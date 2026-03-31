@@ -11,7 +11,7 @@
  * Run via: bun pipeline/fetch-pta.ts
  */
 
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { createReadStream } from "fs";
 import { config } from "dotenv";
 
@@ -44,8 +44,8 @@ async function fetchPTA(): Promise<void> {
   };
 
   const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA foreign_keys = ON;");
 
   try {
     const schemaPath = new URL("../src/cache/schema.sql", import.meta.url).pathname;

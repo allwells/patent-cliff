@@ -17,7 +17,7 @@
  */
 
 import { parseISO, isValid, differenceInDays } from "date-fns";
-import type Database from "better-sqlite3";
+import type { Database } from "bun:sqlite";
 import {
   findProductsByName,
   getPatentsByNDA,
@@ -68,7 +68,7 @@ const STALE_THRESHOLD_DAYS = 45;
 // ── Main handler ───────────────────────────────────────────────────────────────
 
 export async function handlePatentCliff(
-  db: Database.Database,
+  db: Database,
   input: { drug_name: string }
 ): Promise<ToolResponse> {
   const startMs = Date.now();

@@ -1,15 +1,15 @@
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
 
-let db: Database.Database | null = null;
+let db: Database | null = null;
 
 export function initDatabase(dbPath: string): void {
   try {
     db = new Database(dbPath);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA foreign_keys = ON;");
 
     const schema = readFileSync(
       join(import.meta.dirname, "schema.sql"),
@@ -26,7 +26,7 @@ export function initDatabase(dbPath: string): void {
   }
 }
 
-export function getDb(): Database.Database {
+export function getDb(): Database {
   if (!db) {
     throw new Error(
       "Database not initialized. Run initDatabase() at startup."

@@ -5,7 +5,7 @@
  * the interfaces in src/types/index.ts.
  */
 
-import type Database from "better-sqlite3";
+import type { Database } from "bun:sqlite";
 import type {
   ProductRow,
   OBPatentRow,
@@ -24,7 +24,7 @@ import type {
  * Returns all matching products — the caller picks the best match.
  */
 export function findProductsByName(
-  db: Database.Database,
+  db: Database,
   query: string
 ): ProductRow[] {
   return db
@@ -42,7 +42,7 @@ export function findProductsByName(
  * Find the Reference Listed Drug (rld=1) for a given NDA number.
  */
 export function findRLDByNDA(
-  db: Database.Database,
+  db: Database,
   ndaNumber: string
 ): ProductRow | null {
   return (
@@ -55,7 +55,7 @@ export function findRLDByNDA(
 // ── Patents ────────────────────────────────────────────────────────────────────
 
 export function getPatentsByNDA(
-  db: Database.Database,
+  db: Database,
   ndaNumber: string
 ): OBPatentRow[] {
   return db
@@ -70,7 +70,7 @@ export function getPatentsByNDA(
 // ── Exclusivity ────────────────────────────────────────────────────────────────
 
 export function getExclusivityByNDA(
-  db: Database.Database,
+  db: Database,
   ndaNumber: string
 ): ExclusivityRow[] {
   return db
@@ -81,7 +81,7 @@ export function getExclusivityByNDA(
 // ── Paragraph IV ──────────────────────────────────────────────────────────────
 
 export function getParagraphIVByNDA(
-  db: Database.Database,
+  db: Database,
   ndaNumber: string
 ): ParagraphIVRow[] {
   return db
@@ -92,7 +92,7 @@ export function getParagraphIVByNDA(
 // ── PTA / PTE ─────────────────────────────────────────────────────────────────
 
 export function getPTARecord(
-  db: Database.Database,
+  db: Database,
   patentNumber: string
 ): PTARecordRow | null {
   return (
@@ -103,7 +103,7 @@ export function getPTARecord(
 }
 
 export function getPTERecord(
-  db: Database.Database,
+  db: Database,
   patentNumber: string
 ): PTERecordRow | null {
   return (
@@ -116,7 +116,7 @@ export function getPTERecord(
 // ── PTAB ──────────────────────────────────────────────────────────────────────
 
 export function getPTABProceedingsByPatent(
-  db: Database.Database,
+  db: Database,
   patentNumber: string
 ): PTABProceedingRow[] {
   return db
@@ -131,7 +131,7 @@ export function getPTABProceedingsByPatent(
 // ── Data freshness ─────────────────────────────────────────────────────────────
 
 export function getDataFreshness(
-  db: Database.Database
+  db: Database
 ): Record<string, DataFreshnessRow> {
   const rows = db
     .prepare(`SELECT * FROM data_freshness`)
@@ -143,7 +143,7 @@ export function getDataFreshness(
 // ── Query log ──────────────────────────────────────────────────────────────────
 
 export function logQuery(
-  db: Database.Database,
+  db: Database,
   entry: {
     drug_name: string;
     resolved_nda: string | null;
@@ -154,10 +154,13 @@ export function logQuery(
 ): void {
   db.prepare(
     `INSERT INTO query_log (drug_name, resolved_nda, risk_score, response_ms, cache_hit, queried_at)
-     VALUES (@drug_name, @resolved_nda, @risk_score, @response_ms, @cache_hit, @queried_at)`
-  ).run({
-    ...entry,
-    cache_hit: entry.cache_hit ? 1 : 0,
-    queried_at: new Date().toISOString(),
-  });
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    entry.drug_name,
+    entry.resolved_nda,
+    entry.risk_score,
+    entry.response_ms,
+    entry.cache_hit ? 1 : 0,
+    new Date().toISOString()
+  );
 }
