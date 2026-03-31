@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "MCP tool for pharmaceutical patent expiration analysis — PTA/PTE calculations, Paragraph IV status, PTAB proceedings, and generic entry risk scoring",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
