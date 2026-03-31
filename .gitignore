@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.env
+.env.local
+*.tsbuildinfo
+
+# Database files — contain downloaded government data, not source code
+*.db
+*.sqlite
+
+# Project meta files — not for version control
+.claude/
+CLAUDE.md
+GIT.md
+IMPROVEMENTS.md
+CLAUDE_SESSION.md
+CONTEXT.md
+
+# OS
+.DS_Store
+Thumbs.db
