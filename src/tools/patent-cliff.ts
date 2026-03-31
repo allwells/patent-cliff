@@ -42,6 +42,7 @@ import type {
   DrugNotFoundResponse,
   ToolResponse,
   OBPatentRow,
+  DataFreshnessRow,
 } from "../types/index.js";
 
 // ── Disclaimer text ────────────────────────────────────────────────────────────
@@ -63,7 +64,10 @@ const PRE_ANDA_NOTICE =
   "Pre-ANDA confidential development activity, pre-submission inquiries, and undisclosed generic programs " +
   "are not visible. Generic competition risk may exist beyond what public records show.";
 
-const STALE_THRESHOLD_DAYS = 45;
+const STALE_WARNING_TEMPLATE =
+  "One or more data sources have not been updated within their expected refresh window. " +
+  "Results may not reflect the latest patent status. " +
+  "Stale sources: {sources}. Run the data pipeline to refresh.";
 
 // ── Main handler ───────────────────────────────────────────────────────────────
 
@@ -230,27 +234,35 @@ function selectControllingPatent(patents: OBPatentRow[]): OBPatentRow {
   })[0]!;
 }
 
-function buildDataFreshness(freshness: Record<string, { last_updated: string; last_run_status: string }>) {
+function buildDataFreshness(freshness: Record<string, DataFreshnessRow>) {
   const obRow = freshness["orangebook"];
   const usptoRow = freshness["pta"] ?? freshness["pte"];
   const ptabRow = freshness["ptab"];
 
-  const isStale = (lastUpdated: string | undefined): boolean => {
-    if (!lastUpdated) return true;
-    const d = parseISO(lastUpdated);
-    return !isValid(d) || differenceInDays(new Date(), d) > STALE_THRESHOLD_DAYS;
+  const isStale = (row: DataFreshnessRow | undefined): boolean => {
+    if (!row) return true;
+    const d = parseISO(row.last_updated);
+    if (!isValid(d)) return true;
+    return differenceInDays(new Date(), d) > row.ttl_days;
   };
 
-  const anyStale =
-    isStale(obRow?.last_updated) ||
-    isStale(usptoRow?.last_updated) ||
-    isStale(ptabRow?.last_updated);
+  const staleSources: string[] = [];
+  if (isStale(obRow)) staleSources.push("FDA Orange Book");
+  if (isStale(usptoRow)) staleSources.push("USPTO PTA/PTE");
+  if (isStale(ptabRow)) staleSources.push("PTAB");
+
+  const anyStale = staleSources.length > 0;
+  const staleWarning = anyStale
+    ? STALE_WARNING_TEMPLATE.replace("{sources}", staleSources.join(", "))
+    : null;
 
   return {
     orangebook_last_updated: obRow?.last_updated ?? null,
     uspto_last_updated: usptoRow?.last_updated ?? null,
     ptab_last_updated: ptabRow?.last_updated ?? null,
     any_source_stale: anyStale,
+    stale_sources: staleSources,
+    stale_warning: staleWarning,
   };
 }
 

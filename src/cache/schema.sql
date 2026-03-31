@@ -154,8 +154,18 @@ CREATE TABLE IF NOT EXISTS data_freshness (
   source        TEXT PRIMARY KEY,           -- "orangebook" | "pta" | "pte" | "ptab"
   last_updated  TEXT NOT NULL,              -- ISO 8601
   rows_current  INTEGER NOT NULL DEFAULT 0,
-  last_run_status TEXT NOT NULL DEFAULT 'unknown'  -- "success" | "partial" | "failed"
+  last_run_status TEXT NOT NULL DEFAULT 'unknown',  -- "success" | "partial" | "failed"
+  ttl_days      INTEGER NOT NULL DEFAULT 30  -- stale threshold per source
 );
+
+-- Seed default TTLs — pipeline scripts update rows on successful runs.
+-- orangebook: monthly (30d), pta/pte: quarterly (90d), ptab: bi-weekly (14d)
+INSERT OR IGNORE INTO data_freshness (source, last_updated, rows_current, last_run_status, ttl_days)
+VALUES
+  ('orangebook', '1970-01-01T00:00:00.000Z', 0, 'never_run', 30),
+  ('pta',        '1970-01-01T00:00:00.000Z', 0, 'never_run', 90),
+  ('pte',        '1970-01-01T00:00:00.000Z', 0, 'never_run', 90),
+  ('ptab',       '1970-01-01T00:00:00.000Z', 0, 'never_run', 14);
 
 -- ============================================================
 -- Query Log (Analytics)

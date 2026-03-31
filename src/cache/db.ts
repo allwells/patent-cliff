@@ -17,6 +17,13 @@ export function initDatabase(dbPath: string): void {
     );
     db.exec(schema);
 
+    // Migration: add ttl_days if not present on an existing data_freshness table
+    try {
+      db.exec("ALTER TABLE data_freshness ADD COLUMN ttl_days INTEGER NOT NULL DEFAULT 30");
+    } catch {
+      // Column already exists — no-op
+    }
+
     logger.info("db", "Database initialized", { path: dbPath });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

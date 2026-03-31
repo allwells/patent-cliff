@@ -87,6 +87,7 @@ export interface DataFreshnessRow {
   last_updated: string;
   rows_current: number;
   last_run_status: string;
+  ttl_days: number;
 }
 
 // ============================================================
@@ -188,6 +189,8 @@ export interface PatentCliffResponse {
     uspto_last_updated: string | null;
     ptab_last_updated: string | null;
     any_source_stale: boolean;
+    stale_sources: string[];
+    stale_warning: string | null;
   };
 }
 

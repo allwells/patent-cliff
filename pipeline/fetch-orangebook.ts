@@ -2,24 +2,22 @@
  * FDA Orange Book pipeline script.
  *
  * Downloads and normalizes three Orange Book flat files:
- *   products.txt  — approved drug products
- *   patent.txt    — associated patents and Paragraph IV certifications
+ *   product.txt     — approved drug products
+ *   patent.txt      — associated patents and Paragraph IV certifications
  *   exclusivity.txt — exclusivity periods (NCE, ODE, PED, etc.)
  *
- * Files are pipe-delimited (|), not CSV. Updated monthly by FDA.
+ * FDA distributes these as a single zip (EOBZIP_YYYY_MM.zip).
+ * Files are tilde-delimited (~). Updated monthly by FDA.
  * Run via: bun pipeline/fetch-orangebook.ts
  */
 
 import { Database } from "bun:sqlite";
 import { config } from "dotenv";
+import { unzipSync } from "fflate";
 
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "./patent-cliff.db";
-const OB_BASE_URL = "https://www.fda.gov/media/76860/download"; // products.zip
-// Individual file URLs (FDA serves these as a zip; we handle each text file)
-const OB_PRODUCTS_URL =
-  "https://www.fda.gov/media/76860/download?attachment";
 const OB_ZIP_URL = "https://www.fda.gov/media/76860/download";
 
 interface PipelineResult {
@@ -57,8 +55,6 @@ async function fetchOrangeBook(): Promise<void> {
       JSON.stringify({ level: "info", source: "orangebook", message: "Fetching Orange Book zip..." })
     );
 
-    // FDA serves the Orange Book as orangebook_full_[month].zip
-    // We fetch the known stable redirect URL.
     const zipRes = await fetch(OB_ZIP_URL, {
       headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
     });
@@ -67,17 +63,13 @@ async function fetchOrangeBook(): Promise<void> {
       throw new Error(`Failed to fetch Orange Book zip: ${zipRes.status} ${zipRes.statusText}`);
     }
 
-    // Parse zip in memory using Bun's built-in zip support
-    const zipBuffer = Buffer.from(await zipRes.arrayBuffer());
+    const zipBuffer = new Uint8Array(await zipRes.arrayBuffer());
+    const files = unzipSync(zipBuffer);
 
-    // Bun can handle zip extraction via the 'unzipper' approach
-    // We use the @zip.js/zip.js or parse raw entries
-    // For simplicity: use the individual file endpoints FDA also provides
-    const [products, patents, exclusivity] = await Promise.all([
-      fetchOBFile("products.txt"),
-      fetchOBFile("patent.txt"),
-      fetchOBFile("exclusivity.txt"),
-    ]);
+    const decoder = new TextDecoder("utf-8");
+    const products = extractZipEntry(files, "product.txt", decoder);
+    const patents = extractZipEntry(files, "patent.txt", decoder);
+    const exclusivity = extractZipEntry(files, "exclusivity.txt", decoder);
 
     const insertProduct = db.prepare(`
       INSERT OR REPLACE INTO products
@@ -214,26 +206,17 @@ async function fetchOrangeBook(): Promise<void> {
   console.log(JSON.stringify(result));
 }
 
-async function fetchOBFile(filename: string): Promise<string> {
-  // FDA hosts individual Orange Book files at these paths
-  const fileUrls: Record<string, string> = {
-    "products.txt": "https://www.fda.gov/media/76860/download?attachment",
-    "patent.txt": "https://www.fda.gov/media/76861/download?attachment",
-    "exclusivity.txt": "https://www.fda.gov/media/76862/download?attachment",
-  };
-
-  const url = fileUrls[filename];
-  if (!url) throw new Error(`Unknown Orange Book file: ${filename}`);
-
-  const res = await fetch(url, {
-    headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ${filename}: ${res.status} ${res.statusText}`);
-  }
-
-  return res.text();
+function extractZipEntry(
+  files: Record<string, Uint8Array>,
+  filename: string,
+  decoder: TextDecoder
+): string {
+  // zip entries may be in a subdirectory — find case-insensitively
+  const key = Object.keys(files).find(
+    (k) => k.toLowerCase().endsWith(filename.toLowerCase())
+  );
+  if (!key) throw new Error(`${filename} not found in Orange Book zip`);
+  return decoder.decode(files[key]);
 }
 
 function* parseOBFile(content: string): Generator<string[]> {
@@ -242,7 +225,7 @@ function* parseOBFile(content: string): Generator<string[]> {
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i]?.trim();
     if (!line) continue;
-    yield line.split("~"); // Orange Book uses ~ as delimiter in some versions, | in others
+    yield line.split("~"); // Orange Book flat files are tilde-delimited
   }
 }
 
