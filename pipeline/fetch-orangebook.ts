@@ -17,7 +17,7 @@ import { unzipSync } from "fflate";
 
 config();
 
-const DB_PATH = process.env["DB_PATH"] ?? "./patent-cliff.db";
+const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
 const OB_ZIP_URL = "https://www.fda.gov/media/76860/download";
 
 interface PipelineResult {
@@ -67,7 +67,7 @@ async function fetchOrangeBook(): Promise<void> {
     const files = unzipSync(zipBuffer);
 
     const decoder = new TextDecoder("utf-8");
-    const products = extractZipEntry(files, "product.txt", decoder);
+    const products = extractZipEntry(files, "products.txt", decoder);
     const patents = extractZipEntry(files, "patent.txt", decoder);
     const exclusivity = extractZipEntry(files, "exclusivity.txt", decoder);
 
@@ -75,44 +75,61 @@ async function fetchOrangeBook(): Promise<void> {
       INSERT OR REPLACE INTO products
         (nda_number, drug_name, active_ingredient, applicant, strength, dosage_form, route, approval_date, te_code, rld, type)
       VALUES
-        (@nda_number, @drug_name, @active_ingredient, @applicant, @strength, @dosage_form, @route, @approval_date, @te_code, @rld, @type)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertPatent = db.prepare(`
       INSERT OR REPLACE INTO ob_patents
         (nda_number, patent_number, patent_expire_date, drug_substance_flag, drug_product_flag, patent_use_code, delist_flag, submission_date)
       VALUES
-        (@nda_number, @patent_number, @patent_expire_date, @drug_substance_flag, @drug_product_flag, @patent_use_code, @delist_flag, @submission_date)
+        (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertExclusivity = db.prepare(`
       INSERT OR REPLACE INTO exclusivity (nda_number, exclusivity_code, exclusivity_date)
-      VALUES (@nda_number, @exclusivity_code, @exclusivity_date)
+      VALUES (?, ?, ?)
     `);
 
     const insertParaIV = db.prepare(`
       INSERT OR REPLACE INTO paragraph_iv (nda_number, patent_number, applicant_name, anda_number, submission_date)
-      VALUES (@nda_number, @patent_number, @applicant_name, @anda_number, @submission_date)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
     // Run all inserts in a single transaction
     const runAll = db.transaction(() => {
+      // Full refresh — clear all Orange Book tables before re-inserting.
+      // paragraph_iv uses NULL anda_number, so INSERT OR REPLACE can't deduplicate
+      // across runs; products/ob_patents are cleared for consistency.
+      db.exec("DELETE FROM paragraph_iv");
+      db.exec("DELETE FROM ob_patents");
+      db.exec("DELETE FROM exclusivity");
+      db.exec("DELETE FROM products");
+
+      // Track inserted Para IV (nda, patent) pairs to avoid NULL-key duplicates within run
+      const insertedParaIV = new Set<string>();
+
       // Products
+      // products.txt columns (tilde-delimited):
+      // 0=Ingredient, 1=DF;Route, 2=Trade_Name, 3=Applicant, 4=Strength,
+      // 5=Appl_Type, 6=Appl_No, 7=Product_No, 8=TE_Code, 9=Approval_Date,
+      // 10=RLD, 11=RS, 12=Type, 13=Applicant_Full_Name
       for (const row of parseOBFile(products)) {
         try {
-          insertProduct.run({
-            nda_number: row[0] ?? "",
-            drug_name: row[1] ?? "",
-            active_ingredient: row[2] ?? "",
-            applicant: row[3] ?? "",
-            strength: row[4] ?? "",
-            dosage_form: row[5] ?? "",
-            route: row[6] ?? "",
-            approval_date: parseOBDate(row[7]),
-            te_code: row[8] ?? null,
-            rld: row[9] === "Yes" ? 1 : 0,
-            type: row[10] ?? "RX",
-          });
+          const [dosageForm, route] = (row[1] ?? "").split(";").map((s) => s.trim());
+          const ndaNumber = (row[5] ?? "") + (row[6] ?? "");
+          insertProduct.run(
+            ndaNumber,
+            row[2] ?? "",          // Trade_Name → drug_name
+            row[0] ?? "",          // Ingredient → active_ingredient
+            row[3] ?? "",          // Applicant
+            row[4] ?? "",          // Strength
+            dosageForm ?? "",
+            route ?? "",
+            parseOBDate(row[9]),   // Approval_Date
+            row[8] ?? null,        // TE_Code
+            row[10] === "Yes" ? 1 : 0,
+            row[12] ?? "RX",       // Type
+          );
           result.rows_inserted++;
         } catch {
           result.rows_skipped++;
@@ -120,33 +137,39 @@ async function fetchOrangeBook(): Promise<void> {
       }
 
       // Patents + Paragraph IV
+      // patent.txt columns (tilde-delimited):
+      // 0=Appl_Type, 1=Appl_No, 2=Product_No, 3=Patent_No,
+      // 4=Patent_Expire_Date_Text, 5=Drug_Substance_Flag, 6=Drug_Product_Flag,
+      // 7=Patent_Use_Code, 8=Delist_Flag, 9=Submission_Date
       for (const row of parseOBFile(patents)) {
         try {
-          const ndaNumber = row[0] ?? "";
-          const patentNumber = row[1] ?? "";
+          const ndaNumber = (row[0] ?? "") + (row[1] ?? "");
+          const patentNumber = row[3] ?? "";
 
-          insertPatent.run({
-            nda_number: ndaNumber,
-            patent_number: patentNumber,
-            patent_expire_date: parseOBDate(row[2]) ?? row[2] ?? "",
-            drug_substance_flag: row[3] === "Y" ? 1 : 0,
-            drug_product_flag: row[4] === "Y" ? 1 : 0,
-            patent_use_code: row[5] ?? null,
-            delist_flag: row[6] === "Y" ? 1 : 0,
-            submission_date: parseOBDate(row[7]),
-          });
+          insertPatent.run(
+            ndaNumber,
+            patentNumber,
+            parseOBDate(row[4]) ?? row[4] ?? "",
+            row[5] === "Y" ? 1 : 0,  // Drug_Substance_Flag
+            row[6] === "Y" ? 1 : 0,  // Drug_Product_Flag
+            row[7] ?? null,           // Patent_Use_Code
+            row[8] === "Y" ? 1 : 0,  // Delist_Flag
+            parseOBDate(row[9]),      // Submission_Date
+          );
           result.rows_inserted++;
 
-          // Paragraph IV: use_code starts with "U-" and para_iv column = "Y"
-          // In Orange Book patent.txt: col[8] is the Paragraph IV indicator
-          if (row[8] === "Y" || (row[5] ?? "").startsWith("U-")) {
-            insertParaIV.run({
-              nda_number: ndaNumber,
-              patent_number: patentNumber,
-              applicant_name: null, // applicant detail is in ANDA records
-              anda_number: null,
-              submission_date: parseOBDate(row[7]),
-            });
+          // Paragraph IV indicator: Patent_Use_Code starts with "U-"
+          // Deduplicate per (nda, patent) — NULL anda_number bypasses SQLite UNIQUE
+          const paraKey = `${ndaNumber}|${patentNumber}`;
+          if ((row[7] ?? "").startsWith("U-") && !insertedParaIV.has(paraKey)) {
+            insertedParaIV.add(paraKey);
+            insertParaIV.run(
+              ndaNumber,
+              patentNumber,
+              null, // applicant detail not in patent.txt
+              null,
+              parseOBDate(row[9]),
+            );
             result.rows_inserted++;
           }
         } catch {
@@ -155,13 +178,16 @@ async function fetchOrangeBook(): Promise<void> {
       }
 
       // Exclusivity
+      // exclusivity.txt columns (tilde-delimited):
+      // 0=Appl_Type, 1=Appl_No, 2=Product_No, 3=Exclusivity_Code, 4=Exclusivity_Date
       for (const row of parseOBFile(exclusivity)) {
         try {
-          insertExclusivity.run({
-            nda_number: row[0] ?? "",
-            exclusivity_code: row[1] ?? "",
-            exclusivity_date: parseOBDate(row[2]) ?? row[2] ?? "",
-          });
+          const ndaNumber = (row[0] ?? "") + (row[1] ?? "");
+          insertExclusivity.run(
+            ndaNumber,
+            row[3] ?? "",             // Exclusivity_Code
+            parseOBDate(row[4]) ?? row[4] ?? "",
+          );
           result.rows_inserted++;
         } catch {
           result.rows_skipped++;
@@ -229,17 +255,29 @@ function* parseOBFile(content: string): Generator<string[]> {
   }
 }
 
-// Orange Book dates are in MM/DD/YYYY format — normalize to ISO 8601
+const MONTH_MAP: Record<string, string> = {
+  Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
+  Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12",
+};
+
+// Orange Book dates appear as "Apr 12, 2023" or "MM/DD/YYYY" — normalize to ISO 8601
 function parseOBDate(raw: string | undefined): string | null {
   if (!raw || raw.trim() === "") return null;
   const trimmed = raw.trim();
   // Already ISO
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
   // MM/DD/YYYY
-  const match = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (match) {
-    const [, mm, dd, yyyy] = match;
+  const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const [, mm, dd, yyyy] = slashMatch;
     return `${yyyy}-${mm!.padStart(2, "0")}-${dd!.padStart(2, "0")}`;
+  }
+  // "Apr 12, 2023" or "Apr 1, 2023"
+  const longMatch = trimmed.match(/^([A-Za-z]{3})\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (longMatch) {
+    const [, mon, dd, yyyy] = longMatch;
+    const mm = MONTH_MAP[mon!];
+    if (mm) return `${yyyy}-${mm}-${dd!.padStart(2, "0")}`;
   }
   return null;
 }

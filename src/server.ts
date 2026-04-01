@@ -39,8 +39,11 @@ export function startServer(): void {
   });
 
   // CTX Protocol auth middleware — allows discovery (tools/list) without auth,
-  // requires verified JWT for execution (tools/call)
-  app.use("/mcp", createContextMiddleware() as unknown as RequestHandler);
+  // requires verified JWT for execution (tools/call).
+  // Skipped in dev mode (NODE_ENV=development) for local testing without OAuth.
+  if (process.env["NODE_ENV"] !== "development") {
+    app.use("/mcp", createContextMiddleware() as unknown as RequestHandler);
+  }
 
   // MCP endpoint — stateless HTTP Streaming transport (one server+transport per request).
   // No-arg constructor omits sessionIdGenerator, which is stateless mode at runtime.

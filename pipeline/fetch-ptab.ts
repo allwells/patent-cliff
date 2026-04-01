@@ -16,7 +16,7 @@ import { config } from "dotenv";
 
 config();
 
-const DB_PATH = process.env["DB_PATH"] ?? "./patent-cliff.db";
+const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
 const PTAB_API_BASE = "https://developer.uspto.gov/ptab-api";
 
 interface PipelineResult {
@@ -59,8 +59,9 @@ async function fetchPTAB(): Promise<void> {
     const { readFileSync } = await import("fs");
     db.exec(readFileSync(schemaPath, "utf-8"));
 
+    // Exclude *PED variants — Orange Book constructs, not real USPTO patent numbers
     const targetPatents = db
-      .prepare("SELECT DISTINCT patent_number FROM ob_patents")
+      .prepare("SELECT DISTINCT patent_number FROM ob_patents WHERE patent_number NOT LIKE '%*PED'")
       .all() as Array<{ patent_number: string }>;
 
     if (targetPatents.length === 0) {
@@ -113,10 +114,24 @@ async function fetchPTAB(): Promise<void> {
       }
     });
 
-    // Query PTAB API per patent — only IPR and PGR proceedings are relevant
+    // Query PTAB API per patent — only IPR and PGR proceedings are relevant.
+    // Abort early if the API returns HTML (endpoint has moved).
+    let consecutiveHtmlResponses = 0;
     for (const { patent_number } of targetPatents) {
       try {
-        const proceedings = await queryPTABForPatent(patent_number);
+        const { proceedings, apiMoved } = await queryPTABForPatent(patent_number);
+        if (apiMoved) {
+          consecutiveHtmlResponses++;
+          result.rows_skipped++;
+          if (consecutiveHtmlResponses >= 3) {
+            const msg = "PTAB API is returning HTML for all requests — endpoint has moved. Aborting pipeline. Update PTAB_API_BASE.";
+            result.errors.push(msg);
+            console.error(JSON.stringify({ level: "error", source: "ptab", message: msg }));
+            break;
+          }
+          continue;
+        }
+        consecutiveHtmlResponses = 0;
         if (proceedings.length > 0) {
           runInserts(proceedings);
         }
@@ -168,15 +183,20 @@ async function fetchPTAB(): Promise<void> {
 
 async function queryPTABForPatent(
   patentNumber: string
-): Promise<PTABProceeding[]> {
+): Promise<{ proceedings: PTABProceeding[]; apiMoved: boolean }> {
   // PTAB API uses "US" prefixed patent numbers
   const formattedNumber = `US${patentNumber}`;
-  const url = `${PTAB_API_BASE}/proceedings?respondentPatentNumber=${encodeURIComponent(formattedNumber)}&proceedingTypeCategory=AIA+Trial&rows=50`;
+  const url = `${PTAB_API_BASE}/proceedings?respondentPatentNumber=${encodeURIComponent(formattedNumber)}&proceedingTypeCategory=AIA+Trial&rows=50&start=0`;
 
   const res = await fetchWithBackoff(url);
   if (!res.ok) {
-    if (res.status === 404) return []; // No proceedings — normal
+    if (res.status === 404) return { proceedings: [], apiMoved: false };
     throw new Error(`PTAB API ${res.status}: ${res.statusText}`);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("text/html")) {
+    return { proceedings: [], apiMoved: true };
   }
 
   const data = (await res.json()) as {
@@ -184,7 +204,7 @@ async function queryPTABForPatent(
     trials?: PTABProceeding[];
   };
 
-  return data.results ?? data.trials ?? [];
+  return { proceedings: data.results ?? data.trials ?? [], apiMoved: false };
 }
 
 async function fetchWithBackoff(
@@ -199,7 +219,10 @@ async function fetchWithBackoff(
       try {
         const res = await fetch(url, {
           signal: controller.signal,
-          headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "PatentCliff/1.0 (patent data pipeline)",
+          },
         });
         if (res.status === 429) {
           const retryAfter = res.headers.get("retry-after");

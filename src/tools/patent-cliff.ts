@@ -26,6 +26,7 @@ import {
   getPTARecord,
   getPTERecord,
   getPTABProceedingsByPatent,
+  getPEDPatentExpiry,
   getDataFreshness,
   logQuery,
 } from "../cache/queries.js";
@@ -150,7 +151,24 @@ export async function handlePatentCliff(
   }
 
   // ── 6. Pediatric exclusivity ─────────────────────────────────────────────────
-  const pediatric = calculatePediatricExclusivity(exclusivityRows, preExclusivityExpiry);
+  let pediatric = calculatePediatricExclusivity(exclusivityRows, preExclusivityExpiry);
+
+  // Orange Book *PED rows encode the patent-specific PED-extended expiry
+  // (patent base + 6 months). This is authoritative for blocking generic entry.
+  // Override the exclusivity-table PED result when the patent *PED expiry is later.
+  const pedPatentExpiry = getPEDPatentExpiry(db, ndaNumber, controllingPatent.patent_number);
+  if (pedPatentExpiry) {
+    const pedDate = parseISO(pedPatentExpiry);
+    const baseDate = parseISO(preExclusivityExpiry);
+    if (isValid(pedDate) && isValid(baseDate) && pedDate > baseDate) {
+      pediatric = {
+        applies: true,
+        end_date: pedPatentExpiry,
+        extension_days: differenceInDays(pedDate, baseDate),
+      };
+    }
+  }
+
   const finalAdjustedExpiry = applyPediatricExtension(preExclusivityExpiry, pediatric);
 
   // ── 7. Risk verdict ──────────────────────────────────────────────────────────

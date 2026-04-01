@@ -15,11 +15,8 @@ import { config } from "dotenv";
 
 config();
 
-const DB_PATH = process.env["DB_PATH"] ?? "./patent-cliff.db";
-
-// USPTO publishes a list of all PTE grants. This page has a structured table.
-const USPTO_PTE_LIST_URL =
-  "https://www.uspto.gov/patent/laws-and-regulations/patent-term-extension/patent-term-extension-status-report";
+const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
+const PATENTSVIEW_API_KEY = process.env["PATENTSVIEW_API_KEY"] ?? "";
 
 interface PipelineResult {
   source: "pte";
@@ -60,7 +57,7 @@ async function fetchPTE(): Promise<void> {
 
     // Only fetch PTE for patents we track in ob_patents
     const targetPatents = db
-      .prepare("SELECT DISTINCT patent_number FROM ob_patents")
+      .prepare("SELECT DISTINCT patent_number FROM ob_patents WHERE patent_number NOT LIKE '%*PED'")
       .all() as Array<{ patent_number: string }>;
 
     if (targetPatents.length === 0) {
@@ -88,29 +85,25 @@ async function fetchPTE(): Promise<void> {
          pre_grant_deduction, cap_applied, nda_submission_date, nda_approval_date,
          grant_date, uspto_pte_days, last_updated)
       VALUES
-        (@patent_number, @pte_days, @testing_phase_credit, @approval_phase_credit,
-         @pre_grant_deduction, @cap_applied, @nda_submission_date, @nda_approval_date,
-         @grant_date, @uspto_pte_days, @last_updated)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const runInserts = db.transaction((records: PTERecord[]) => {
       for (const rec of records) {
         try {
-          insertPTE.run({
-            patent_number: rec.patent_number,
-            pte_days: rec.pte_days,
-            // Breakdown fields computed by calculations engine (Phase 3)
-            // Here we store the raw PTE days from USPTO; breakdown computed on query
-            testing_phase_credit: 0,
-            approval_phase_credit: 0,
-            pre_grant_deduction: 0,
-            cap_applied: "none",
-            nda_submission_date: rec.nda_submission_date,
-            nda_approval_date: rec.nda_approval_date,
-            grant_date: rec.grant_date,
-            uspto_pte_days: rec.uspto_pte_days,
-            last_updated: result.last_updated,
-          });
+          insertPTE.run(
+            rec.patent_number,
+            rec.pte_days,
+            0,
+            0,
+            0,
+            "none",
+            rec.nda_submission_date,
+            rec.nda_approval_date,
+            rec.grant_date,
+            rec.uspto_pte_days,
+            result.last_updated
+          );
           result.rows_inserted++;
         } catch {
           result.rows_skipped++;
@@ -152,9 +145,16 @@ async function fetchPTE(): Promise<void> {
 }
 
 async function fetchPTEFromUSPTO(targetSet: Set<string>): Promise<PTERecord[]> {
-  // USPTO PTE data is available in the PatentsView dataset as well.
-  // We query the PatentsView API for PTE-specific fields.
-  const url = "https://api.patentsview.org/patents/query";
+  if (!PATENTSVIEW_API_KEY) {
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        source: "pte",
+        message: "PATENTSVIEW_API_KEY is not set — skipping PTE lookup. PTE data will be sourced from Orange Book patent_expire_date.",
+      })
+    );
+    return [];
+  }
 
   const targetPatents = [...targetSet];
   const records: PTERecord[] = [];
@@ -163,25 +163,17 @@ async function fetchPTEFromUSPTO(targetSet: Set<string>): Promise<PTERecord[]> {
   for (let i = 0; i < targetPatents.length; i += BATCH_SIZE) {
     const batch = targetPatents.slice(i, i + BATCH_SIZE);
 
-    const body = {
-      q: { patent_number: batch },
-      f: [
-        "patent_number",
-        "patent_date",
-        "patent_term_extension",
-        "patent_term_extension_application_date",
-        "patent_term_extension_approved_date",
-      ],
-      o: { per_page: batch.length },
-    };
+    const q = JSON.stringify({ patent_id: batch });
+    const f = JSON.stringify(["patent_id", "patent_date", "patent_term_adjustment"]);
+    const o = JSON.stringify({ per_page: batch.length });
+    const url = `https://search.patentsview.org/api/v1/patents?q=${encodeURIComponent(q)}&f=${encodeURIComponent(f)}&o=${encodeURIComponent(o)}`;
 
     const res = await fetch(url, {
-      method: "POST",
+      method: "GET",
       headers: {
-        "Content-Type": "application/json",
+        "X-Api-Key": PATENTSVIEW_API_KEY,
         "User-Agent": "PatentCliff/1.0 (patent data pipeline)",
       },
-      body: JSON.stringify(body),
     });
 
     if (!res.ok) continue;
@@ -190,21 +182,19 @@ async function fetchPTEFromUSPTO(targetSet: Set<string>): Promise<PTERecord[]> {
       patents?: Array<{
         patent_id: string;
         patent_date?: string;
-        patent_term_extension?: number;
-        patent_term_extension_application_date?: string;
-        patent_term_extension_approved_date?: string;
+        patent_term_adjustment?: number;
       }>;
     };
 
     for (const p of data.patents ?? []) {
-      if (p.patent_term_extension && p.patent_term_extension > 0) {
+      if (p.patent_term_adjustment && p.patent_term_adjustment > 0) {
         records.push({
           patent_number: p.patent_id,
-          pte_days: p.patent_term_extension,
-          nda_submission_date: p.patent_term_extension_application_date ?? null,
-          nda_approval_date: p.patent_term_extension_approved_date ?? null,
+          pte_days: p.patent_term_adjustment,
+          nda_submission_date: null,
+          nda_approval_date: null,
           grant_date: p.patent_date ?? null,
-          uspto_pte_days: p.patent_term_extension,
+          uspto_pte_days: p.patent_term_adjustment,
         });
       }
     }

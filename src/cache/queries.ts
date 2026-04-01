@@ -62,9 +62,29 @@ export function getPatentsByNDA(
     .prepare(
       `SELECT * FROM ob_patents
        WHERE nda_number = ? AND delist_flag = 0
+         AND patent_number NOT LIKE '%*PED'
        ORDER BY patent_expire_date DESC`
     )
     .all(ndaNumber) as OBPatentRow[];
+}
+
+/**
+ * Returns the Orange Book *PED-extended expiry for a patent, if one exists.
+ * Orange Book creates a separate row suffixed with "*PED" showing the patent's
+ * expiry date after the 6-month pediatric extension is applied.
+ */
+export function getPEDPatentExpiry(
+  db: Database,
+  ndaNumber: string,
+  patentNumber: string
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT patent_expire_date FROM ob_patents
+       WHERE nda_number = ? AND patent_number = ?`
+    )
+    .get(ndaNumber, `${patentNumber}*PED`) as { patent_expire_date: string } | undefined;
+  return row?.patent_expire_date ?? null;
 }
 
 // ── Exclusivity ────────────────────────────────────────────────────────────────

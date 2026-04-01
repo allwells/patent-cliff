@@ -1,0 +1,25 @@
+FROM oven/bun:alpine
+
+WORKDIR /app
+
+# Install supercronic (cron daemon designed for containers)
+# Check https://github.com/aptible/supercronic/releases if upgrading
+ARG SUPERCRONIC_VERSION=v0.2.33
+ARG SUPERCRONIC_ARCH=amd64
+RUN wget -qO /usr/local/bin/supercronic \
+      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${SUPERCRONIC_ARCH}" \
+    && chmod +x /usr/local/bin/supercronic
+
+# Install dependencies
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# Copy pipeline scripts and the schema file they reference at runtime
+# (pipeline scripts resolve schema via: new URL("../src/cache/schema.sql", import.meta.url))
+COPY tsconfig.json ./
+COPY src/cache/schema.sql ./src/cache/schema.sql
+COPY pipeline/ ./pipeline/
+
+ENV DB_PATH=/data/cache.db
+
+CMD ["supercronic", "/app/pipeline/crontab"]
