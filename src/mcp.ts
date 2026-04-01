@@ -37,7 +37,33 @@ export function createMcpServer(): McpServer {
           ),
       },
       outputSchema: {
-        result: z.unknown().describe("PatentCliffResponse or DrugNotFoundResponse"),
+        // Shared
+        drug_name: z.string(),
+        disclaimers: z.object({
+          estimate_notice: z.string().optional(),
+          sealed_paragraph_iv_notice: z.string(),
+          pre_anda_notice: z.string(),
+        }),
+        // DrugNotFoundResponse
+        found: z.boolean().optional(),
+        message: z.string().optional(),
+        // PatentCliffResponse
+        active_ingredient: z.string().optional(),
+        nda_number: z.string().optional(),
+        applicant: z.string().optional(),
+        base_expiry: z.string().optional(),
+        pta_adjusted_expiry: z.string().nullable().optional(),
+        pte_adjusted_expiry: z.string().nullable().optional(),
+        final_adjusted_expiry: z.string().optional(),
+        expiry_is_estimate: z.literal(true).optional(),
+        pta: z.record(z.unknown()).nullable().optional(),
+        pte: z.record(z.unknown()).nullable().optional(),
+        paragraph_iv: z.record(z.unknown()).optional(),
+        ptab: z.record(z.unknown()).optional(),
+        pediatric_exclusivity: z.record(z.unknown()).optional(),
+        risk_score: z.string().optional(),
+        risk_factors: z.array(z.string()).optional(),
+        data_freshness: z.record(z.unknown()).optional(),
       },
     },
     async ({ drug_name }) => {
@@ -63,7 +89,7 @@ export function createMcpServer(): McpServer {
         const result = await handlePatentCliff(db, { drug_name });
 
         return {
-          structuredContent: { result } as Record<string, unknown>,
+          structuredContent: result as unknown as Record<string, unknown>,
           content: [
             {
               type: "text" as const,
