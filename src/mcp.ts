@@ -63,7 +63,7 @@ export function createMcpServer(): McpServer {
         const result = await handlePatentCliff(db, { drug_name });
 
         return {
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: { result } as Record<string, unknown>,
           content: [
             {
               type: "text" as const,
