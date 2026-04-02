@@ -22,6 +22,10 @@ const ORANGE_BOOK_PAGE_URL =
   process.env["ORANGE_BOOK_PAGE_URL"] ??
   "https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files";
 const ORANGE_BOOK_ZIP_URL = process.env["ORANGE_BOOK_ZIP_URL"] ?? null;
+const ORANGE_BOOK_FALLBACK_ZIP_URLS = [
+  "https://www.fda.gov/media/76860/download?attachment",
+  "https://www.fda.gov/media/76860/download",
+] as const;
 
 interface PipelineResult {
   source: "orangebook";
@@ -66,7 +70,7 @@ async function fetchOrangeBook(): Promise<void> {
     );
 
     const zipRes = await fetch(zipUrl, {
-      headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
+      headers: buildFDAHeaders(),
     });
 
     if (!zipRes.ok) {
@@ -247,8 +251,14 @@ async function resolveOrangeBookZipUrl(): Promise<string> {
     return ORANGE_BOOK_ZIP_URL;
   }
 
+  for (const candidate of ORANGE_BOOK_FALLBACK_ZIP_URLS) {
+    if (await isReachable(candidate)) {
+      return candidate;
+    }
+  }
+
   const pageRes = await fetch(ORANGE_BOOK_PAGE_URL, {
-    headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
+    headers: buildFDAHeaders(),
   });
 
   if (!pageRes.ok) {
@@ -272,9 +282,34 @@ async function resolveOrangeBookZipUrl(): Promise<string> {
   }
 
   throw new Error(
-    `Could not locate Orange Book ZIP link on ${ORANGE_BOOK_PAGE_URL}. ` +
+    `Could not resolve Orange Book ZIP from known URLs or ${ORANGE_BOOK_PAGE_URL}. ` +
       "Set ORANGE_BOOK_ZIP_URL explicitly to override."
   );
+}
+
+async function isReachable(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      headers: buildFDAHeaders(),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function buildFDAHeaders(): HeadersInit {
+  return {
+    "User-Agent":
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Accept":
+      "text/html,application/xhtml+xml,application/xml;q=0.9,application/zip;q=0.8,*/*;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+  };
 }
 
 function extractZipEntry(
