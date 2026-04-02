@@ -50,9 +50,24 @@ cp .env.example .env
 
 ### Load data
 
-#### 1. FDA Orange Book (automated — runs monthly via pipeline)
+#### 1. FDA Orange Book (prefer local ZIP in production)
 
-Downloads and parses the Orange Book zip directly from FDA. No manual step required.
+The pipeline can fetch the Orange Book ZIP from FDA, but some VPS or Dokploy environments receive `404` responses from FDA edge URLs. For production, the safer path is to store the ZIP on the shared volume and let the pipeline read it locally.
+
+Recommended production path:
+
+```sh
+mkdir -p $DATA_DIR/patex
+cp ~/Downloads/orangebook.zip $DATA_DIR/patex/orangebook.zip
+```
+
+Set:
+
+```sh
+ORANGE_BOOK_ZIP_PATH=/data/patex/orangebook.zip
+```
+
+The pipeline reads the ZIP directly and extracts `products.txt`, `patent.txt`, and `exclusivity.txt` in memory. No manual unzip step is required.
 
 ```sh
 bun pipeline/fetch-orangebook.ts
@@ -87,9 +102,9 @@ bun pipeline/fetch-pte.ts
 
 > `g_application.tsv` is required by both scripts — it maps application numbers to patent numbers. The pipeline will print a clear error with the download URL if any file is missing.
 
-#### 3. PTAB proceedings (automated — runs monthly via pipeline)
+#### 3. PTAB proceedings (currently best-effort)
 
-Fetches IPR/PGR docket data from the USPTO PTAB API. No API key required.
+PTAB ingestion is currently best-effort. The legacy PTAB endpoint has been unstable, and the replacement USPTO API may require credentials or endpoint updates depending on environment. The tool degrades gracefully when PTAB data is unavailable, but risk scores will not incorporate active PTAB proceedings in that case.
 
 ```sh
 bun pipeline/fetch-ptab.ts
@@ -137,17 +152,25 @@ Both containers share the same bind-mounted `/data` volume. On Dokploy, create a
 ```sh
 ssh user@your-vps "mkdir -p /var/lib/dokploy/volumes/patent-cliff/patex"
 
+scp ~/Downloads/orangebook.zip     user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
 scp ~/Downloads/pta_summary.csv    user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
 scp ~/Downloads/pte_summary.csv    user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
 scp ~/Downloads/g_application.tsv  user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
 ```
 
+Set this in the pipeline app:
+
+```sh
+ORANGE_BOOK_ZIP_PATH=/data/patex/orangebook.zip
+```
+
 **When to update data files:**
 
-| File                                  | When                                                                                                      |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `pta_summary.csv` / `pte_summary.csv` | Annually — check [ECOPAIR dataset](https://data.uspto.gov/bulkdata/datasets/ecopair) for new release      |
-| `g_application.tsv`                   | Quarterly — check [PVGPATDIS dataset](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) for new release |
+| File                                  | When                                                                                                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `orangebook.zip`                      | Monthly — download the latest ZIP from the [Orange Book Data Files](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) page |
+| `pta_summary.csv` / `pte_summary.csv` | Annually — check [ECOPAIR dataset](https://data.uspto.gov/bulkdata/datasets/ecopair) for new release                                                    |
+| `g_application.tsv`                   | Quarterly — check [PVGPATDIS dataset](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) for new release                                               |
 
 ---
 
@@ -190,9 +213,9 @@ bun run /refresh-data orangebook   # refresh one source
 | [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files)                | Approved drugs, patents, exclusivity, Para IV certifications                                                                     | Monthly          | 30 days |
 | [PatEx Research Dataset — ECOPAIR](https://data.uspto.gov/bulkdata/datasets/ecopair)                            | `pta_summary.csv` — Patent Term Adjustment totals and breakdown (§154); `pte_summary.csv` — Patent Term Extension records (§156) | Annually         | 90 days |
 | [PatentsView Granted Patent Disambiguated Data — PVGPATDIS](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | `g_application.tsv` — application number to patent number mapping (join key for PTA/PTE)                                         | Quarterly        | 90 days |
-| [USPTO PTAB API](https://data.uspto.gov/apis/ptab-trials)                                                       | IPR/PGR/CBM proceedings                                                                                                          | Ongoing          | 14 days |
+| USPTO PTAB API / docket sources                                                                                 | IPR/PGR/CBM proceedings                                                                                                          | Ongoing          | 14 days |
 
-All data is public domain. PTA/PTE bulk files are ingested offline from locally-stored copies. Orange Book and PTAB are fetched automatically by pipeline scripts.
+All data is public domain. PTA/PTE bulk files are ingested offline from locally-stored copies. Orange Book can be fetched automatically but is more reliable in production from a locally-mounted ZIP. PTAB ingestion is best-effort and may be unavailable until the current USPTO endpoint is stabilized.
 
 > **PTA data coverage note:** The PatEx dataset currently covers applications through June 2023. Patents granted after that date will have `pta_days = 0` until the dataset is next updated. This is disclosed in the `data_freshness` block of every response.
 

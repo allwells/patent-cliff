@@ -3,20 +3,20 @@
 ## Data Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────────────────┐
 │  OFFLINE PIPELINE  (scheduled monthly via supercronic in pipeline container) │
-│                                                                             │
-│  FDA Orange Book ──────────────────────────────────────────────────────┐   │
-│  (auto-downloaded from fda.gov)                                        │   │
-│                                                                        │   │
-│  USPTO PTAB API ───────────────────────────────────────────────────────┤   │
-│  (auto-fetched from data.uspto.gov/apis/ptab-trials)                   │   │
-│                                                                        ├──►│ pipeline/*.ts ──► SQLite
-│  pta_summary.csv ──────────────────────────────────────────────────────┤   │
-│  pte_summary.csv  ──(manually copied to /data/patex/ — see below)──────┤   │
-│  g_application.tsv ────────────────────────────────────────────────────┘   │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+│                                                                              │
+│  FDA Orange Book ZIP ───────────────────────────────────────────────────┐    │
+│  (prefer local /data/patex/orangebook.zip in production)                │    │
+│                                                                         │    │
+│  USPTO PTAB API ────────────────────────────────────────────────────────┤    │
+│  (best-effort; endpoint currently unstable)                             │    │
+│                                                                         ├──► │ pipeline/*.ts ──► SQLite
+│  pta_summary.csv ───────────────────────────────────────────────────────┤    │
+│  pte_summary.csv  ──(manually copied to /data/patex/ — see below)───────┤    │
+│  g_application.tsv ─────────────────────────────────────────────────────┘    │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────────────┐
@@ -64,14 +64,27 @@
 
 ## Data Sources
 
-### Automated (pipeline fetches on schedule)
+### Automated / best-effort
 
 | Source                                                                                                                                                             | Pipeline Script       | Update Frequency |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- | ---------------- |
 | [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) — single zip with `products.txt`, `patent.txt`, `exclusivity.txt` | `fetch-orangebook.ts` | Monthly          |
-| [USPTO PTAB API v3](https://data.uspto.gov/apis/ptab-trials) — IPR/PGR/CBM proceedings                                                                             | `fetch-ptab.ts`       | Bi-weekly        |
+| USPTO PTAB API / docket sources                                                                                                                                    | `fetch-ptab.ts`       | Bi-weekly        |
 
-### Manual (CAPTCHA-protected — copy to `/data/patex/` on server)
+In production, `fetch-orangebook.ts` prefers `ORANGE_BOOK_ZIP_PATH` when a local ZIP is available. This avoids FDA edge/CDN failures observed from some VPS environments.
+
+### Manual (copy to `/data/patex/` on server)
+
+The following inputs are read from local disk in production:
+
+| File                | Purpose                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| `orangebook.zip`    | FDA Orange Book monthly ZIP; read directly by the pipeline without manual extraction |
+| `pta_summary.csv`   | PTA bulk data                                                                        |
+| `pte_summary.csv`   | PTE bulk data                                                                        |
+| `g_application.tsv` | application-to-patent join map                                                       |
+
+### Manual (CAPTCHA-protected — USPTO bulk files)
 
 These files are distributed via [data.uspto.gov](https://data.uspto.gov) bulk data pages that require solving a math CAPTCHA before generating a time-limited signed download URL. Automated fetching is not possible. The pipeline reads them from the local filesystem.
 
@@ -105,7 +118,7 @@ Eight tables in `src/cache/schema.sql`:
 | `paragraph_iv`     | FDA Orange Book `patent.txt`                  | ANDA filers, submission dates                 |
 | `pta_records`      | PatEx `pta_summary.csv` + `g_application.tsv` | PTA days + A/B/C breakdown per patent number  |
 | `pte_records`      | PatEx `pte_summary.csv` + `g_application.tsv` | PTE days per patent number (§156 grants only) |
-| `ptab_proceedings` | USPTO PTAB API                                | IPR/PGR status per patent number              |
+| `ptab_proceedings` | USPTO PTAB API / docket source                | IPR/PGR status per patent number              |
 | `data_freshness`   | Written by pipeline scripts                   | Last-updated + TTL per source                 |
 | `query_log`        | Written at query time                         | Analytics — drug, NDA, risk score, latency    |
 
@@ -181,6 +194,7 @@ Two Docker containers share a single bind-mounted volume:
   │
   ├── cache.db                  → SQLite database (written by pipeline, read by server)
   └── patex/
+      ├── orangebook.zip        → manually updated monthly or mounted from local download
       ├── pta_summary.csv       → manually updated annually
       ├── pte_summary.csv       → manually updated annually
       └── g_application.tsv     → manually updated quarterly
@@ -188,10 +202,10 @@ Two Docker containers share a single bind-mounted volume:
 Maps to /data/ inside both containers.
 ```
 
-| Container               | Dockerfile            | Role                                                                                          |
-| ----------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
-| `patent-cliff`          | `Dockerfile`          | MCP server — serves queries 24/7                                                              |
-| `patent-cliff-pipeline` | `Dockerfile.pipeline` | One-shot job — runs `pipeline/run-all.ts` and exits; triggered by VPS host cron (see below)  |
+| Container               | Dockerfile            | Role                                                                                        |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------------------- |
+| `patent-cliff`          | `Dockerfile`          | MCP server — serves queries 24/7                                                            |
+| `patent-cliff-pipeline` | `Dockerfile.pipeline` | One-shot job — runs `pipeline/run-all.ts` and exits; triggered by VPS host cron (see below) |
 
 **Scheduling:** Add this to `/etc/crontab` on the VPS host (adjust the image name to match what Dokploy built):
 
@@ -244,10 +258,10 @@ Pipeline run order enforced by `run-all.ts`:
 ```
 patent-cliff/
 ├── pipeline/
-│   ├── fetch-orangebook.ts     # FDA Orange Book ingestion (auto-download)
+│   ├── fetch-orangebook.ts     # FDA Orange Book ingestion (prefer local ZIP, fallback to network)
 │   ├── fetch-pta.ts            # PTA ingestion from local pta_summary.csv + g_application.tsv
 │   ├── fetch-pte.ts            # PTE ingestion from local pte_summary.csv + g_application.tsv
-│   ├── fetch-ptab.ts           # PTAB ingestion from USPTO PTAB API (auto-fetch)
+│   ├── fetch-ptab.ts           # PTAB ingestion from USPTO sources (best-effort)
 │   ├── run-all.ts              # Orchestrator: OB first, then PTA/PTE/PTAB in parallel
 │   └── crontab                 # supercronic schedule (5th of month, 03:00 UTC)
 ├── src/
