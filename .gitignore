@@ -11,11 +11,14 @@ dist/
 *.db-wal
 
 # Project meta files — not for version control
+.codex
+.codex/
 .claude/
+AGENTS.md
 CLAUDE.md
 GIT.md
 IMPROVEMENTS.md
-CLAUDE_SESSION.md
+AI_SESSION.md
 CONTEXT.md
 CTX_TEST_PROMPTS.md
 TEST_RESULTS.md

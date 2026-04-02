@@ -3,14 +3,20 @@
 ## Data Flow
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│  OFFLINE PIPELINE  (run on schedule, not at query time)            │
-│                                                                    │
-│  FDA Orange Book ──┐                                               │
-│  USPTO PTA data ───┼──► pipeline/*.ts ──► SQLite (patent-cliff.db) │
-│  USPTO PTE data ───┤                                               │
-│  USPTO PTAB API ───┘                                               │
-└────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  OFFLINE PIPELINE  (scheduled monthly via supercronic in pipeline container) │
+│                                                                             │
+│  FDA Orange Book ──────────────────────────────────────────────────────┐   │
+│  (auto-downloaded from fda.gov)                                        │   │
+│                                                                        │   │
+│  USPTO PTAB API ───────────────────────────────────────────────────────┤   │
+│  (auto-fetched from data.uspto.gov/apis/ptab-trials)                   │   │
+│                                                                        ├──►│ pipeline/*.ts ──► SQLite
+│  pta_summary.csv ──────────────────────────────────────────────────────┤   │
+│  pte_summary.csv  ──(manually copied to /data/patex/ — see below)──────┤   │
+│  g_application.tsv ────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────────────┐
@@ -56,21 +62,52 @@
 
 ---
 
+## Data Sources
+
+### Automated (pipeline fetches on schedule)
+
+| Source | Pipeline Script | Update Frequency |
+|--------|----------------|-----------------|
+| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) — single zip with `products.txt`, `patent.txt`, `exclusivity.txt` | `fetch-orangebook.ts` | Monthly |
+| [USPTO PTAB API v3](https://data.uspto.gov/apis/ptab-trials) — IPR/PGR/CBM proceedings | `fetch-ptab.ts` | Bi-weekly |
+
+### Manual (CAPTCHA-protected — copy to `/data/patex/` on server)
+
+These files are distributed via [data.uspto.gov](https://data.uspto.gov) bulk data pages that require solving a math CAPTCHA before generating a time-limited signed download URL. Automated fetching is not possible. The pipeline reads them from the local filesystem.
+
+| File | Dataset | Download Page | Update Frequency |
+|------|---------|---------------|-----------------|
+| `pta_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
+| `pte_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
+| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly |
+
+**Join logic:** `pta_summary` and `pte_summary` are keyed by `application_number`. Orange Book patents are keyed by patent number. The join chain is:
+
+```
+pta_summary.application_number
+  → g_application.application_id
+  → g_application.patent_id          (= ob_patents.patent_number)
+```
+
+**PTA data coverage:** PatEx currently covers applications through June 2023. Patents granted after that date will have `pta_days = 0` until the dataset updates.
+
+---
+
 ## SQLite Schema
 
 Eight tables in `src/cache/schema.sql`:
 
-| Table              | Source                            | Notes                                      |
-| ------------------ | --------------------------------- | ------------------------------------------ |
-| `products`         | FDA Orange Book `products.txt`    | Brand name, active ingredient, NDA number  |
-| `ob_patents`       | FDA Orange Book `patent.txt`      | Base expiry dates per NDA                  |
-| `exclusivity`      | FDA Orange Book `exclusivity.txt` | NCE, ODE, PED codes and expiry dates       |
-| `paragraph_iv`     | FDA Orange Book `patent.txt`      | ANDA filers, submission dates              |
-| `pta_records`      | USPTO PatentsView                 | PTA days + breakdown per patent number     |
-| `pte_records`      | USPTO Official Gazette            | PTE days + breakdown per patent number     |
-| `ptab_proceedings` | USPTO PTAB API                    | IPR/PGR status per patent number           |
-| `data_freshness`   | Written by pipeline scripts       | Last-updated + TTL per source              |
-| `query_log`        | Written at query time             | Analytics — drug, NDA, risk score, latency |
+| Table              | Source                                        | Notes                                         |
+| ------------------ | --------------------------------------------- | --------------------------------------------- |
+| `products`         | FDA Orange Book `products.txt`                | Brand name, active ingredient, NDA number     |
+| `ob_patents`       | FDA Orange Book `patent.txt`                  | Base expiry dates per NDA                     |
+| `exclusivity`      | FDA Orange Book `exclusivity.txt`             | NCE, ODE, PED codes and expiry dates          |
+| `paragraph_iv`     | FDA Orange Book `patent.txt`                  | ANDA filers, submission dates                 |
+| `pta_records`      | PatEx `pta_summary.csv` + `g_application.tsv` | PTA days + A/B/C breakdown per patent number  |
+| `pte_records`      | PatEx `pte_summary.csv` + `g_application.tsv` | PTE days per patent number (§156 grants only) |
+| `ptab_proceedings` | USPTO PTAB API                                | IPR/PGR status per patent number              |
+| `data_freshness`   | Written by pipeline scripts                   | Last-updated + TTL per source                 |
+| `query_log`        | Written at query time                         | Analytics — drug, NDA, risk score, latency    |
 
 All queries are hand-written SQL. No ORM.
 
@@ -94,7 +131,7 @@ PTA = Category_A + Category_B + Category_C
 - **Overlap deduction** — Days counted under multiple categories are counted once
 - **Applicant delay deduction** — Days caused by applicant inaction
 
-The USPTO publishes the total PTA days on the patent face. PatentsView bulk exports carry this value. PatentCliff stores it as `pta_records.pta_days` and computes `adjusted_expiry = base_expiry + pta_days`.
+The PatEx `pta_summary.csv` file (from the USPTO's Office of Chief Economist) provides the final `patent_term_adjustment` value alongside the full `pto_delay_a`, `pto_delay_b`, `pto_delay_c`, `overlap_pto_delay`, and `applicant_delay` breakdown. PatentCliff stores all fields and computes `adjusted_expiry = base_expiry + pta_days`.
 
 All PTA results carry `is_estimate: true` — PTA is frequently corrected by the USPTO after grant and can be litigated.
 
@@ -111,7 +148,7 @@ Subject to two caps:
 - **5-year absolute cap** on PTE days
 - **14-year post-approval cap** on total patent life remaining after approval
 
-PTE and PTA are mutually exclusive — only one applies to the controlling patent. The tool applies PTE when available; otherwise PTA.
+PTE data comes from the PatEx `pte_summary.csv` file, which contains `patent_term_extension` (§156 grants only — only patents that actually received a PTE certificate are present). PTE and PTA are mutually exclusive — only one applies to the controlling patent. The tool applies PTE when available; otherwise PTA.
 
 ### Pediatric Exclusivity
 
@@ -135,6 +172,33 @@ When a drug has multiple Orange Book patents, PatentCliff selects the one with t
 
 ---
 
+## Deployment Architecture
+
+Two Docker containers share a single bind-mounted volume:
+
+```
+/var/lib/dokploy/volumes/patent-cliff/   (host)
+  │
+  ├── cache.db                  → SQLite database (written by pipeline, read by server)
+  └── patex/
+      ├── pta_summary.csv       → manually updated annually
+      ├── pte_summary.csv       → manually updated annually
+      └── g_application.tsv     → manually updated quarterly
+
+Maps to /data/ inside both containers.
+```
+
+| Container | Dockerfile | Role |
+|-----------|-----------|------|
+| `patent-cliff` | `Dockerfile` | MCP server — serves queries |
+| `patent-cliff-pipeline` | `Dockerfile.pipeline` | supercronic — runs `pipeline/run-all.ts` on the 5th of each month at 03:00 UTC |
+
+Pipeline run order enforced by `run-all.ts`:
+1. `fetch-orangebook.ts` — must succeed; downstream scripts depend on `ob_patents`
+2. `fetch-pta.ts`, `fetch-pte.ts`, `fetch-ptab.ts` — run in parallel
+
+---
+
 ## Agent System
 
 | Agent                  | Owns                                          | Responsibility                                                   |
@@ -151,6 +215,8 @@ When a drug has multiple Orange Book patents, PatentCliff selects the one with t
 
 **No live government API calls at query time.** All data is pre-loaded via pipeline scripts. This keeps p99 latency predictable and the service independent of government API availability. The trade-off is that data is only as fresh as the last pipeline run — disclosed via `data_freshness` in every response.
 
+**PTA/PTE from PatEx, not PatentsView API.** The PatentsView API requires regional ID verification (ID.me) that is not available in all jurisdictions. PatEx bulk files provide richer data (full A/B/C breakdown, actual §156 extension records) and require no registration. The downside is annual update cadence and manual download due to CAPTCHA protection.
+
 **Controlling patent, not all patents.** PTA and PTE are applied only to the latest-expiry patent. This gives the worst-case (latest) generic entry date, which is the commercially relevant figure for BD and investment analysis.
 
 **PTE and PTA are mutually exclusive.** 35 U.S.C. §156(c)(1) prohibits double-counting. The tool applies PTE when a PTE record exists; otherwise PTA.
@@ -166,10 +232,12 @@ When a drug has multiple Orange Book patents, PatentCliff selects the one with t
 ```
 patent-cliff/
 ├── pipeline/
-│   ├── fetch-orangebook.ts     # FDA Orange Book ingestion
-│   ├── fetch-pta.ts            # USPTO PTA ingestion
-│   ├── fetch-pte.ts            # USPTO PTE ingestion
-│   └── fetch-ptab.ts           # USPTO PTAB ingestion
+│   ├── fetch-orangebook.ts     # FDA Orange Book ingestion (auto-download)
+│   ├── fetch-pta.ts            # PTA ingestion from local pta_summary.csv + g_application.tsv
+│   ├── fetch-pte.ts            # PTE ingestion from local pte_summary.csv + g_application.tsv
+│   ├── fetch-ptab.ts           # PTAB ingestion from USPTO PTAB API (auto-fetch)
+│   ├── run-all.ts              # Orchestrator: OB first, then PTA/PTE/PTAB in parallel
+│   └── crontab                 # supercronic schedule (5th of month, 03:00 UTC)
 ├── src/
 │   ├── cache/
 │   │   ├── schema.sql          # SQLite schema + data_freshness seed rows
@@ -195,12 +263,12 @@ patent-cliff/
 │   ├── pte.test.ts             # PTE calculation unit tests
 │   ├── verdict.test.ts         # Risk score unit tests
 │   └── patent-cliff.test.ts    # Integration tests (in-memory SQLite)
-├── guard-agent/
-│   └── memory/
-│       └── check-history.md    # Guard pre/post run history
+├── Dockerfile                  # MCP server image
+├── Dockerfile.pipeline         # Pipeline scheduler image (supercronic)
 ├── .claude/
 │   └── PLAN.md                 # Implementation progress tracker
 ├── CLAUDE.md                   # Project instructions for Claude Code
+├── ARCHITECTURE.md             # This file
 ├── .env.example
 └── package.json
 ```

@@ -4,19 +4,42 @@
  * PTE is granted per 35 U.S.C. §156 to compensate for time lost during
  * FDA regulatory review. Only one patent per NDA can receive PTE.
  *
- * Data source: USPTO PTE list (published in the Official Gazette and
- * available as a structured list from the USPTO website).
+ * Sources PTE data from two locally-stored bulk files:
+ *
+ *   1. pte_summary.csv  — from PatEx Research Dataset (ECOPAIR)
+ *      Columns: application_number, pto_adjustment, pto_delay,
+ *               applicant_delay, patent_term_extension
+ *      Download: https://data.uspto.gov/bulkdata/datasets/ecopair
+ *      Updates:  Annually
+ *
+ *   2. g_application.tsv — from PatentsView Granted Patent Disambiguated Data (PVGPATDIS)
+ *      Columns: application_id, patent_id, ...
+ *      Download: https://data.uspto.gov/bulkdata/datasets/pvgpatdis
+ *      Updates:  Quarterly
+ *
+ * These files require a CAPTCHA to download (human-only) and are stored at
+ * DATA_DIR/patex/. Copy new versions there when the datasets are updated.
+ *
+ * Join: pte_summary.application_number → g_application.application_id → g_application.patent_id
  *
  * Run via: bun pipeline/fetch-pte.ts
  */
 
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { config } from "dotenv";
 
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
-const PATENTSVIEW_API_KEY = process.env["PATENTSVIEW_API_KEY"] ?? "";
+const DATA_DIR = process.env["DATA_DIR"] ?? "/data";
+const PATEX_DIR = join(DATA_DIR, "patex");
+
+const PTE_SUMMARY_PATH = process.env["PTE_SUMMARY_PATH"] ?? join(PATEX_DIR, "pte_summary.csv");
+const G_APPLICATION_PATH = process.env["G_APPLICATION_PATH"] ?? join(PATEX_DIR, "g_application.tsv");
 
 interface PipelineResult {
   source: "pte";
@@ -27,13 +50,12 @@ interface PipelineResult {
   errors: string[];
 }
 
-interface PTERecord {
+interface PTERow {
   patent_number: string;
   pte_days: number;
-  nda_submission_date: string | null;
-  nda_approval_date: string | null;
-  grant_date: string | null;
-  uspto_pte_days: number;
+  pto_adjustment: number;
+  pto_delay: number;
+  applicant_delay: number;
 }
 
 async function fetchPTE(): Promise<void> {
@@ -55,7 +77,9 @@ async function fetchPTE(): Promise<void> {
     const { readFileSync } = await import("fs");
     db.exec(readFileSync(schemaPath, "utf-8"));
 
-    // Only fetch PTE for patents we track in ob_patents
+    await assertFileExists(PTE_SUMMARY_PATH, "pte_summary.csv", "ecopair");
+    await assertFileExists(G_APPLICATION_PATH, "g_application.tsv", "pvgpatdis");
+
     const targetPatents = db
       .prepare("SELECT DISTINCT patent_number FROM ob_patents WHERE patent_number NOT LIKE '%*PED'")
       .all() as Array<{ patent_number: string }>;
@@ -63,21 +87,33 @@ async function fetchPTE(): Promise<void> {
     if (targetPatents.length === 0) {
       result.status = "failed";
       result.errors.push("ob_patents table is empty — run orangebook pipeline first");
+      console.log(JSON.stringify(result));
       return;
     }
 
-    const targetSet = new Set(targetPatents.map((r) => r.patent_number));
+    const targetSet = new Set(targetPatents.map((r) => normalizePatentNumber(r.patent_number)));
 
-    console.error(
-      JSON.stringify({
-        level: "info",
-        source: "pte",
-        message: "Fetching USPTO PTE records...",
-      })
-    );
+    console.error(JSON.stringify({
+      level: "info", source: "pte",
+      message: `Building application→patent map for ${targetSet.size} target patents...`,
+    }));
 
-    // Fetch the USPTO PTE status report page and parse the table
-    const pteRecords = await fetchPTEFromUSPTO(targetSet);
+    const patentToApp = await buildPatentToApplicationMap(G_APPLICATION_PATH, targetSet);
+    const appToPatent = new Map<string, string>();
+    for (const [patent, app] of patentToApp) appToPatent.set(app, patent);
+
+    console.error(JSON.stringify({
+      level: "info", source: "pte",
+      message: `Scanning pte_summary.csv for ${appToPatent.size} application numbers...`,
+    }));
+
+    // pte_summary.csv is tiny (~350KB) — load fully into memory
+    const pteRows = await collectPTERows(PTE_SUMMARY_PATH, appToPatent);
+
+    console.error(JSON.stringify({
+      level: "info", source: "pte",
+      message: `Found PTE data for ${pteRows.length} patents`,
+    }));
 
     const insertPTE = db.prepare(`
       INSERT OR REPLACE INTO pte_records
@@ -85,23 +121,16 @@ async function fetchPTE(): Promise<void> {
          pre_grant_deduction, cap_applied, nda_submission_date, nda_approval_date,
          grant_date, uspto_pte_days, last_updated)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, 0, 0, 0, 'none', NULL, NULL, NULL, ?, ?)
     `);
 
-    const runInserts = db.transaction((records: PTERecord[]) => {
-      for (const rec of records) {
+    const runInserts = db.transaction((rows: PTERow[]) => {
+      for (const row of rows) {
         try {
           insertPTE.run(
-            rec.patent_number,
-            rec.pte_days,
-            0,
-            0,
-            0,
-            "none",
-            rec.nda_submission_date,
-            rec.nda_approval_date,
-            rec.grant_date,
-            rec.uspto_pte_days,
+            row.patent_number,
+            row.pte_days,
+            row.pte_days,
             result.last_updated
           );
           result.rows_inserted++;
@@ -111,7 +140,7 @@ async function fetchPTE(): Promise<void> {
       }
     });
 
-    runInserts(pteRecords);
+    runInserts(pteRows);
 
     db.prepare(`
       INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
@@ -119,14 +148,12 @@ async function fetchPTE(): Promise<void> {
     `).run(result.last_updated, result.rows_inserted);
 
     result.status = result.rows_skipped > 0 ? "partial" : "success";
-    console.error(
-      JSON.stringify({
-        level: "info",
-        source: "pte",
-        message: "PTE pipeline complete",
-        rows_inserted: result.rows_inserted,
-      })
-    );
+    console.error(JSON.stringify({
+      level: "info", source: "pte",
+      message: "PTE pipeline complete",
+      rows_inserted: result.rows_inserted,
+      rows_skipped: result.rows_skipped,
+    }));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);
@@ -144,71 +171,101 @@ async function fetchPTE(): Promise<void> {
   console.log(JSON.stringify(result));
 }
 
-async function fetchPTEFromUSPTO(targetSet: Set<string>): Promise<PTERecord[]> {
-  if (!PATENTSVIEW_API_KEY) {
-    console.error(
-      JSON.stringify({
-        level: "warn",
-        source: "pte",
-        message: "PATENTSVIEW_API_KEY is not set — skipping PTE lookup. PTE data will be sourced from Orange Book patent_expire_date.",
-      })
-    );
-    return [];
-  }
+async function buildPatentToApplicationMap(
+  filePath: string,
+  targetSet: Set<string>
+): Promise<Map<string, string>> {
+  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+  const map = new Map<string, string>();
+  let appIdx = -1;
+  let patentIdx = -1;
+  let isFirst = true;
 
-  const targetPatents = [...targetSet];
-  const records: PTERecord[] = [];
-  const BATCH_SIZE = 25;
+  for await (const line of rl) {
+    const cols = line.split("\t").map((c) => c.replace(/"/g, "").trim());
 
-  for (let i = 0; i < targetPatents.length; i += BATCH_SIZE) {
-    const batch = targetPatents.slice(i, i + BATCH_SIZE);
-
-    const q = JSON.stringify({ patent_id: batch });
-    const f = JSON.stringify(["patent_id", "patent_date", "patent_term_adjustment"]);
-    const o = JSON.stringify({ per_page: batch.length });
-    const url = `https://search.patentsview.org/api/v1/patents?q=${encodeURIComponent(q)}&f=${encodeURIComponent(f)}&o=${encodeURIComponent(o)}`;
-
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "X-Api-Key": PATENTSVIEW_API_KEY,
-        "User-Agent": "PatentCliff/1.0 (patent data pipeline)",
-      },
-    });
-
-    if (!res.ok) continue;
-
-    const data = (await res.json()) as {
-      patents?: Array<{
-        patent_id: string;
-        patent_date?: string;
-        patent_term_adjustment?: number;
-      }>;
-    };
-
-    for (const p of data.patents ?? []) {
-      if (p.patent_term_adjustment && p.patent_term_adjustment > 0) {
-        records.push({
-          patent_number: p.patent_id,
-          pte_days: p.patent_term_adjustment,
-          nda_submission_date: null,
-          nda_approval_date: null,
-          grant_date: p.patent_date ?? null,
-          uspto_pte_days: p.patent_term_adjustment,
-        });
+    if (isFirst) {
+      isFirst = false;
+      appIdx = cols.indexOf("application_id");
+      patentIdx = cols.indexOf("patent_id");
+      if (appIdx === -1 || patentIdx === -1) {
+        throw new Error(
+          `g_application.tsv missing required columns. Found: ${cols.slice(0, 10).join(", ")}`
+        );
       }
+      continue;
     }
 
-    if (i + BATCH_SIZE < targetPatents.length) {
-      await sleep(200);
-    }
+    const patentId = cols[patentIdx]?.trim();
+    const appId = cols[appIdx]?.trim();
+    if (!patentId || !appId) continue;
+    if (targetSet.has(patentId)) map.set(patentId, appId);
   }
 
-  return records;
+  return map;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function collectPTERows(
+  filePath: string,
+  appToPatent: Map<string, string>
+): Promise<PTERow[]> {
+  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+  const rows: PTERow[] = [];
+  let col: Record<string, number> = {};
+  let isFirst = true;
+
+  for await (const line of rl) {
+    if (isFirst) {
+      isFirst = false;
+      const headers = line.split(",").map((h) => h.trim());
+      col = Object.fromEntries(headers.map((h, i) => [h, i]));
+
+      const required = ["application_number", "patent_term_extension"];
+      for (const r of required) {
+        if (!(r in col)) {
+          throw new Error(`pte_summary.csv missing column "${r}". Found: ${headers.join(", ")}`);
+        }
+      }
+      continue;
+    }
+
+    const cells = line.split(",");
+    const appNum = cells[col["application_number"] ?? -1]?.trim();
+    if (!appNum) continue;
+
+    const patentId = appToPatent.get(appNum);
+    if (!patentId) continue;
+
+    const int = (key: string) => parseInt(cells[col[key] ?? -1]?.trim() ?? "0", 10) || 0;
+    const pteDays = int("patent_term_extension");
+    if (pteDays <= 0) continue; // Only store patents that actually received PTE
+
+    rows.push({
+      patent_number: patentId,
+      pte_days: pteDays,
+      pto_adjustment: int("pto_adjustment"),
+      pto_delay: int("pto_delay"),
+      applicant_delay: int("applicant_delay"),
+    });
+  }
+
+  return rows;
+}
+
+async function assertFileExists(filePath: string, fileName: string, dataset: string): Promise<void> {
+  try {
+    await access(filePath);
+  } catch {
+    throw new Error(
+      `Required data file not found: ${filePath}\n` +
+      `Download "${fileName}" from https://data.uspto.gov/bulkdata/datasets/${dataset} ` +
+      `and place it at ${filePath}`
+    );
+  }
+}
+
+function normalizePatentNumber(raw: string): string {
+  return raw.replace(/[^0-9]/g, "");
 }
 
 fetchPTE().catch((err) => {

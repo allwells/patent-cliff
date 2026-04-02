@@ -42,25 +42,68 @@ bun install
 cp .env.example .env
 ```
 
-| Variable  | Default             | Description                  |
-| --------- | ------------------- | ---------------------------- |
-| `PORT`    | `8000`              | HTTP server port             |
-| `DB_PATH` | `./patent-cliff.db` | Path to SQLite database file |
+| Variable   | Default             | Description                       |
+| ---------- | ------------------- | --------------------------------- |
+| `PORT`     | `8000`              | HTTP server port                  |
+| `DB_PATH`  | `./patent-cliff.db` | Path to SQLite database file      |
+| `DATA_DIR` | `/data`             | Root directory for bulk data files |
 
 ### Load data
 
-Run each pipeline script once to populate the database. These download and parse government bulk files into SQLite — no live API calls happen at query time.
+#### 1. FDA Orange Book (automated — runs monthly via pipeline)
+
+Downloads and parses the Orange Book zip directly from FDA. No manual step required.
 
 ```sh
-bun pipeline/fetch-orangebook.ts   # FDA Orange Book (products, patents, exclusivity, Para IV)
-bun pipeline/fetch-pta.ts          # USPTO Patent Term Adjustment records
-bun pipeline/fetch-pte.ts          # USPTO Patent Term Extension records
-bun pipeline/fetch-ptab.ts         # PTAB IPR/PGR docket data
+bun pipeline/fetch-orangebook.ts
 ```
 
-Pipeline scripts write last-updated timestamps to the `data_freshness` table. The server will warn in responses if any source exceeds its TTL (Orange Book: 30 days, PTA/PTE: 90 days, PTAB: 14 days).
+#### 2. USPTO PTA and PTE data (manual download required)
 
-> **Note:** FDA Orange Book download URLs in `pipeline/fetch-orangebook.ts` are placeholders — confirm the exact URLs against live FDA data before the first production pipeline run. See PLAN.md post-impl note.
+PTA and PTE data comes from USPTO bulk research datasets hosted at [data.uspto.gov](https://data.uspto.gov). These files require solving a CAPTCHA to download, so they cannot be fetched automatically. Download them manually and place them in `$DATA_DIR/patex/`.
+
+**Files to download:**
+
+| File | Source Dataset | Page | Update Frequency |
+|------|---------------|------|-----------------|
+| `pta_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
+| `pte_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
+| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly |
+
+After downloading, extract the zip files and place the CSVs/TSV at:
+
+```
+$DATA_DIR/patex/pta_summary.csv
+$DATA_DIR/patex/pte_summary.csv
+$DATA_DIR/patex/g_application.tsv
+```
+
+Then run the pipeline scripts:
+
+```sh
+bun pipeline/fetch-pta.ts
+bun pipeline/fetch-pte.ts
+```
+
+> `g_application.tsv` is required by both scripts — it maps application numbers to patent numbers. The pipeline will print a clear error with the download URL if any file is missing.
+
+#### 3. PTAB proceedings (automated — runs monthly via pipeline)
+
+Fetches IPR/PGR docket data from the USPTO PTAB API. No API key required.
+
+```sh
+bun pipeline/fetch-ptab.ts
+```
+
+#### Run all pipelines at once
+
+```sh
+bun pipeline/run-all.ts
+```
+
+This runs Orange Book first (required by the others), then PTA, PTE, and PTAB in parallel.
+
+Pipeline scripts write last-updated timestamps to the `data_freshness` table. The server warns in responses if any source exceeds its TTL (Orange Book: 30 days, PTA/PTE: 90 days, PTAB: 14 days).
 
 ### Start the server
 
@@ -71,10 +114,40 @@ bun run start    # production
 
 The server exposes two endpoints:
 
-| Endpoint      | Description                                                    |
-| ------------- | -------------------------------------------------------------- |
-| `GET /health` | Returns DB availability, data freshness per source             |
-| `POST /mcp`   | MCP endpoint — requires CTX Protocol auth JWT for `tools/call` |
+| Endpoint      | Description                                                     |
+| ------------- | --------------------------------------------------------------- |
+| `GET /health` | Returns DB availability, data freshness per source              |
+| `POST /mcp`   | MCP endpoint — requires CTX Protocol auth JWT for `tools/call`  |
+
+---
+
+## Production Deployment (Dokploy)
+
+The project ships two Dockerfiles:
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | MCP server — runs `bun dist/index.js` |
+| `Dockerfile.pipeline` | Pipeline scheduler — runs `supercronic` on a monthly cron |
+
+Both containers share the same bind-mounted `/data` volume. On Dokploy, create a second Application pointing to `Dockerfile.pipeline` with the same bind mount (`/var/lib/dokploy/volumes/patent-cliff` → `/data`).
+
+**Initial data file setup on the server:**
+
+```sh
+ssh user@your-vps "mkdir -p /var/lib/dokploy/volumes/patent-cliff/patex"
+
+scp ~/Downloads/pta_summary.csv    user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
+scp ~/Downloads/pte_summary.csv    user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
+scp ~/Downloads/g_application.tsv  user@your-vps:/var/lib/dokploy/volumes/patent-cliff/patex/
+```
+
+**When to update data files:**
+
+| File | When |
+|------|------|
+| `pta_summary.csv` / `pte_summary.csv` | Annually — check [ECOPAIR dataset](https://data.uspto.gov/bulkdata/datasets/ecopair) for new release |
+| `g_application.tsv` | Quarterly — check [PVGPATDIS dataset](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) for new release |
 
 ---
 
@@ -112,14 +185,16 @@ bun run /refresh-data orangebook   # refresh one source
 
 ## Data Sources
 
-| Source                                                                                           | Data                                                         | Update Frequency | TTL     |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ | ---------------- | ------- |
-| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) | Approved drugs, patents, exclusivity, Para IV certifications | Monthly          | 30 days |
-| [USPTO PatentsView](https://patentsview.org/download/data-download-tables)                       | Patent Term Adjustment (PTA) records                         | Periodic         | 90 days |
-| [USPTO Official Gazette](https://www.uspto.gov/patents/patent-term-extension)                    | Patent Term Extension (PTE) records                          | Periodic         | 90 days |
-| [USPTO PTAB](https://developer.uspto.gov/api-catalog/ptab-api-v2)                                | IPR/PGR/CBM proceedings                                      | Bi-weekly        | 14 days |
+| Source | Data | Update Frequency | TTL |
+| ------ | ---- | ---------------- | --- |
+| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) | Approved drugs, patents, exclusivity, Para IV certifications | Monthly | 30 days |
+| [PatEx Research Dataset — ECOPAIR](https://data.uspto.gov/bulkdata/datasets/ecopair) | `pta_summary.csv` — Patent Term Adjustment totals and breakdown (§154); `pte_summary.csv` — Patent Term Extension records (§156) | Annually | 90 days |
+| [PatentsView Granted Patent Disambiguated Data — PVGPATDIS](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | `g_application.tsv` — application number to patent number mapping (join key for PTA/PTE) | Quarterly | 90 days |
+| [USPTO PTAB API](https://data.uspto.gov/apis/ptab-trials) | IPR/PGR/CBM proceedings | Ongoing | 14 days |
 
-All data is public domain. Government bulk files are ingested offline — no live API calls at query time.
+All data is public domain. PTA/PTE bulk files are ingested offline from locally-stored copies. Orange Book and PTAB are fetched automatically by pipeline scripts.
+
+> **PTA data coverage note:** The PatEx dataset currently covers applications through June 2023. Patents granted after that date will have `pta_days = 0` until the dataset is next updated. This is disclosed in the `data_freshness` block of every response.
 
 ---
 

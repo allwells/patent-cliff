@@ -1,23 +1,43 @@
 /**
  * USPTO Patent Term Adjustment (PTA) pipeline script.
  *
- * Sources PTA data from USPTO PatentsView bulk downloads.
- * PTA is granted per 35 U.S.C. §154(b) to compensate for USPTO examination delays.
+ * Sources PTA data from two locally-stored bulk files:
  *
- * PatentsView patent table includes `patent_term_adjustment` (total PTA days).
- * Detailed Category A/B/C breakdowns are only in USPTO PAIR — we use the total
- * from PatentsView and store zeros for breakdown fields (to be enriched later).
+ *   1. pta_summary.csv  — from PatEx Research Dataset (ECOPAIR)
+ *      Columns: application_number, pto_delay_a, pto_delay_b, pto_delay_c,
+ *               overlap_pto_delay, nonoverlap_pto_delay, pto_manual_adjustment,
+ *               applicant_delay, patent_term_adjustment
+ *      Download: https://data.uspto.gov/bulkdata/datasets/ecopair
+ *      Updates:  Annually
+ *
+ *   2. g_application.tsv — from PatentsView Granted Patent Disambiguated Data (PVGPATDIS)
+ *      Columns: application_id, patent_id, patent_application_type, filing_date, ...
+ *      Download: https://data.uspto.gov/bulkdata/datasets/pvgpatdis
+ *      Updates:  Quarterly
+ *
+ * These files require a CAPTCHA to download (human-only) and are stored at
+ * DATA_DIR/patex/. Copy new versions there when the datasets are updated.
+ *
+ * Join: pta_summary.application_number → g_application.application_id → g_application.patent_id
  *
  * Run via: bun pipeline/fetch-pta.ts
  */
 
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { config } from "dotenv";
 
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
-const PATENTSVIEW_API_KEY = process.env["PATENTSVIEW_API_KEY"] ?? "";
+const DATA_DIR = process.env["DATA_DIR"] ?? "/data";
+const PATEX_DIR = join(DATA_DIR, "patex");
+
+const PTA_SUMMARY_PATH = process.env["PTA_SUMMARY_PATH"] ?? join(PATEX_DIR, "pta_summary.csv");
+const G_APPLICATION_PATH = process.env["G_APPLICATION_PATH"] ?? join(PATEX_DIR, "g_application.tsv");
 
 interface PipelineResult {
   source: "pta";
@@ -26,6 +46,18 @@ interface PipelineResult {
   rows_skipped: number;
   last_updated: string;
   errors: string[];
+}
+
+interface PTARow {
+  patent_number: string;
+  pta_days: number;
+  category_a_days: number;
+  category_b_days: number;
+  category_c_days: number;
+  overlap_deduction: number;
+  applicant_delay: number;
+  nonoverlap_pto_delay: number;
+  pto_manual_adjustment: number;
 }
 
 async function fetchPTA(): Promise<void> {
@@ -43,96 +75,79 @@ async function fetchPTA(): Promise<void> {
   db.exec("PRAGMA foreign_keys = ON;");
 
   try {
-    if (!PATENTSVIEW_API_KEY) {
-      console.error(
-        JSON.stringify({
-          level: "warn",
-          source: "pta",
-          message: "PATENTSVIEW_API_KEY is not set — skipping PTA pipeline. Register at https://search.patentsview.org/apikey",
-        })
-      );
-      result.status = "partial";
-      result.errors.push("PATENTSVIEW_API_KEY not set");
-      console.log(JSON.stringify(result));
-      return;
-    }
-
     const schemaPath = new URL("../src/cache/schema.sql", import.meta.url).pathname;
     const { readFileSync } = await import("fs");
     db.exec(readFileSync(schemaPath, "utf-8"));
 
-    // We only need patents that are referenced in our ob_patents table.
-    // Pull the list of patent numbers we care about first.
+    await assertFileExists(PTA_SUMMARY_PATH, "pta_summary.csv", "ecopair");
+    await assertFileExists(G_APPLICATION_PATH, "g_application.tsv", "pvgpatdis");
+
     const targetPatents = db
       .prepare("SELECT DISTINCT patent_number FROM ob_patents WHERE patent_number NOT LIKE '%*PED'")
       .all() as Array<{ patent_number: string }>;
 
     if (targetPatents.length === 0) {
-      console.error(
-        JSON.stringify({
-          level: "warn",
-          source: "pta",
-          message: "No patents in ob_patents table — run orangebook pipeline first",
-        })
-      );
       result.status = "failed";
       result.errors.push("ob_patents table is empty — run orangebook pipeline first");
+      console.log(JSON.stringify(result));
       return;
     }
 
-    const targetSet = new Set(targetPatents.map((r) => r.patent_number));
+    const targetSet = new Set(targetPatents.map((r) => normalizePatentNumber(r.patent_number)));
 
-    console.error(
-      JSON.stringify({
-        level: "info",
-        source: "pta",
-        message: `Fetching PTA data for ${targetSet.size} patents from PatentsView`,
-      })
-    );
+    console.error(JSON.stringify({
+      level: "info", source: "pta",
+      message: `Building application→patent map for ${targetSet.size} target patents...`,
+    }));
 
-    // PatentsView API — query specific patents by number instead of bulk download
-    // More efficient than downloading the full patent.tsv (~1GB)
+    // Step 1: stream g_application.tsv → build map of application_id for target patents only
+    const patentToApp = await buildPatentToApplicationMap(G_APPLICATION_PATH, targetSet);
+    const appToPatent = new Map<string, string>();
+    for (const [patent, app] of patentToApp) appToPatent.set(app, patent);
+
+    console.error(JSON.stringify({
+      level: "info", source: "pta",
+      message: `Mapped ${patentToApp.size} of ${targetSet.size} target patents to application numbers`,
+    }));
+
+    // Step 2: stream pta_summary.csv → collect PTA rows for matched application numbers
+    const ptaRows = await collectPTARows(PTA_SUMMARY_PATH, appToPatent);
+
+    console.error(JSON.stringify({
+      level: "info", source: "pta",
+      message: `Found PTA data for ${ptaRows.length} patents`,
+    }));
+
     const insertPTA = db.prepare(`
       INSERT OR REPLACE INTO pta_records
         (patent_number, pta_days, category_a_days, category_b_days, category_c_days,
          overlap_deduction, applicant_delay, grant_date, application_date, uspto_pta_days, last_updated)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
     `);
-
-    // PatentsView query API — batch by 25 patents per request
-    const BATCH_SIZE = 25;
-    const patents = [...targetSet];
 
     const runInserts = db.transaction((rows: PTARow[]) => {
       for (const row of rows) {
-        insertPTA.run(
-          row.patent_number,
-          row.pta_days,
-          row.category_a_days,
-          row.category_b_days,
-          row.category_c_days,
-          row.overlap_deduction,
-          row.applicant_delay,
-          row.grant_date,
-          row.application_number,
-          row.uspto_pta_days,
-          row.last_updated
-        );
-        result.rows_inserted++;
+        try {
+          insertPTA.run(
+            row.patent_number,
+            row.pta_days,
+            row.category_a_days,
+            row.category_b_days,
+            row.category_c_days,
+            row.overlap_deduction,
+            row.applicant_delay,
+            row.pta_days,
+            result.last_updated
+          );
+          result.rows_inserted++;
+        } catch {
+          result.rows_skipped++;
+        }
       }
     });
 
-    for (let i = 0; i < patents.length; i += BATCH_SIZE) {
-      const batch = patents.slice(i, i + BATCH_SIZE);
-      const rows = await fetchPatentsViewBatch(batch, result.last_updated);
-      if (rows.length > 0) {
-        runInserts(rows);
-      }
-      if (i + BATCH_SIZE < patents.length) {
-        await sleep(200);
-      }
-    }
+    runInserts(ptaRows);
 
     db.prepare(`
       INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
@@ -140,22 +155,17 @@ async function fetchPTA(): Promise<void> {
     `).run(result.last_updated, result.rows_inserted);
 
     result.status = result.rows_skipped > 0 ? "partial" : "success";
-    console.error(
-      JSON.stringify({
-        level: "info",
-        source: "pta",
-        message: "PTA pipeline complete",
-        rows_inserted: result.rows_inserted,
-        rows_skipped: result.rows_skipped,
-      })
-    );
+    console.error(JSON.stringify({
+      level: "info", source: "pta",
+      message: "PTA pipeline complete",
+      rows_inserted: result.rows_inserted,
+      rows_skipped: result.rows_skipped,
+    }));
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     result.errors.push(message);
     result.status = "failed";
-    console.error(
-      JSON.stringify({ level: "error", source: "pta", message })
-    );
+    console.error(JSON.stringify({ level: "error", source: "pta", message }));
 
     db.prepare(`
       INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
@@ -168,67 +178,111 @@ async function fetchPTA(): Promise<void> {
   console.log(JSON.stringify(result));
 }
 
-interface PatentsViewPatent {
-  patent_id: string;
-  patent_date: string;
-  patent_term_adjustment?: number;
-}
+/**
+ * Streams g_application.tsv and builds a map of patent_id → application_id
+ * for only the patents in targetSet.
+ */
+async function buildPatentToApplicationMap(
+  filePath: string,
+  targetSet: Set<string>
+): Promise<Map<string, string>> {
+  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+  const map = new Map<string, string>();
+  let appIdx = -1;
+  let patentIdx = -1;
+  let isFirst = true;
 
-interface PTARow {
-  patent_number: string;
-  pta_days: number;
-  category_a_days: number;
-  category_b_days: number;
-  category_c_days: number;
-  overlap_deduction: number;
-  applicant_delay: number;
-  grant_date: string | null;
-  application_number: null;
-  uspto_pta_days: number | null;
-  last_updated: string;
-}
+  for await (const line of rl) {
+    const cols = line.split("\t").map((c) => c.replace(/"/g, "").trim());
 
-async function fetchPatentsViewBatch(
-  patentNumbers: string[],
-  timestamp: string
-): Promise<PTARow[]> {
-  const q = JSON.stringify({ patent_id: patentNumbers });
-  const f = JSON.stringify(["patent_id", "patent_date", "patent_term_adjustment"]);
-  const o = JSON.stringify({ per_page: patentNumbers.length });
-  const url = `https://search.patentsview.org/api/v1/patents?q=${encodeURIComponent(q)}&f=${encodeURIComponent(f)}&o=${encodeURIComponent(o)}`;
+    if (isFirst) {
+      isFirst = false;
+      appIdx = cols.indexOf("application_id");
+      patentIdx = cols.indexOf("patent_id");
+      if (appIdx === -1 || patentIdx === -1) {
+        throw new Error(
+          `g_application.tsv missing required columns. Found: ${cols.slice(0, 10).join(", ")}`
+        );
+      }
+      continue;
+    }
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "X-Api-Key": PATENTSVIEW_API_KEY,
-      "User-Agent": "PatentCliff/1.0 (patent data pipeline)",
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`PatentsView API error: ${res.status} ${res.statusText}`);
+    const patentId = cols[patentIdx]?.trim();
+    const appId = cols[appIdx]?.trim();
+    if (!patentId || !appId) continue;
+    if (targetSet.has(patentId)) map.set(patentId, appId);
   }
 
-  const data = (await res.json()) as { patents?: PatentsViewPatent[] };
-  const patents = data.patents ?? [];
-
-  return patents.map((p) => ({
-    patent_number: p.patent_id,
-    pta_days: p.patent_term_adjustment ?? 0,
-    category_a_days: 0,
-    category_b_days: 0,
-    category_c_days: 0,
-    overlap_deduction: 0,
-    applicant_delay: 0,
-    grant_date: p.patent_date ?? null,
-    application_number: null,
-    uspto_pta_days: p.patent_term_adjustment ?? null,
-    last_updated: timestamp,
-  }));
+  return map;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Streams pta_summary.csv and returns PTA rows for patents in appToPatent map.
+ */
+async function collectPTARows(
+  filePath: string,
+  appToPatent: Map<string, string>
+): Promise<PTARow[]> {
+  const rl = createInterface({ input: createReadStream(filePath), crlfDelay: Infinity });
+  const rows: PTARow[] = [];
+
+  let col: Record<string, number> = {};
+  let isFirst = true;
+
+  for await (const line of rl) {
+    if (isFirst) {
+      isFirst = false;
+      const headers = line.split(",").map((h) => h.trim());
+      col = Object.fromEntries(headers.map((h, i) => [h, i]));
+
+      const required = ["application_number", "patent_term_adjustment"];
+      for (const r of required) {
+        if (!(r in col)) {
+          throw new Error(`pta_summary.csv missing column "${r}". Found: ${headers.join(", ")}`);
+        }
+      }
+      continue;
+    }
+
+    const cells = line.split(",");
+    const appNum = cells[col["application_number"] ?? -1]?.trim();
+    if (!appNum) continue;
+
+    const patentId = appToPatent.get(appNum);
+    if (!patentId) continue;
+
+    const int = (key: string) => parseInt(cells[col[key] ?? -1]?.trim() ?? "0", 10) || 0;
+
+    rows.push({
+      patent_number: patentId,
+      pta_days: int("patent_term_adjustment"),
+      category_a_days: int("pto_delay_a"),
+      category_b_days: int("pto_delay_b"),
+      category_c_days: int("pto_delay_c"),
+      overlap_deduction: int("overlap_pto_delay"),
+      applicant_delay: int("applicant_delay"),
+      nonoverlap_pto_delay: int("nonoverlap_pto_delay"),
+      pto_manual_adjustment: int("pto_manual_adjustment"),
+    });
+  }
+
+  return rows;
+}
+
+async function assertFileExists(filePath: string, fileName: string, dataset: string): Promise<void> {
+  try {
+    await access(filePath);
+  } catch {
+    throw new Error(
+      `Required data file not found: ${filePath}\n` +
+      `Download "${fileName}" from https://data.uspto.gov/bulkdata/datasets/${dataset} ` +
+      `and place it at ${filePath}`
+    );
+  }
+}
+
+function normalizePatentNumber(raw: string): string {
+  return raw.replace(/[^0-9]/g, "");
 }
 
 fetchPTA().catch((err) => {
