@@ -65,6 +65,12 @@ const PRE_ANDA_NOTICE =
   "Pre-ANDA confidential development activity, pre-submission inquiries, and undisclosed generic programs " +
   "are not visible. Generic competition risk may exist beyond what public records show.";
 
+const PTAB_UNAVAILABLE_NOTICE =
+  "PTAB proceedings data is currently unavailable. The USPTO PTAB API v2 was decommissioned January 6, 2026 " +
+  "and the replacement v3 API requires a regional ODP key that is not yet configured. " +
+  "IPR and PGR challenge history cannot be assessed — the risk score does not account for active PTAB proceedings. " +
+  "Check the USPTO PTAB docket at ptab.uspto.gov for current proceeding status.";
+
 const STALE_WARNING_TEMPLATE =
   "One or more data sources have not been updated within their expected refresh window. " +
   "Results may not reflect the latest patent status. " +
@@ -171,18 +177,24 @@ export async function handlePatentCliff(
 
   const finalAdjustedExpiry = applyPediatricExtension(preExclusivityExpiry, pediatric);
 
-  // ── 7. Risk verdict ──────────────────────────────────────────────────────────
+  // ── 7. Data freshness ────────────────────────────────────────────────────────
+  // Computed before verdict so ptabDataAvailable can influence risk score.
+  const freshness = getDataFreshness(db);
+  const dataFreshness = buildDataFreshness(freshness);
+
+  // PTAB data is considered unavailable when the pipeline has never successfully
+  // loaded any rows (rows_current = 0) or has no freshness record at all.
+  const ptabDataAvailable = (freshness["ptab"]?.rows_current ?? 0) > 0;
+
+  // ── 8. Risk verdict ──────────────────────────────────────────────────────────
   const verdict = synthesizeVerdict({
     finalAdjustedExpiry,
     paragraphIVRows,
     ptabRows,
+    ptabDataAvailable,
     pediatric,
     exclusivityRows,
   });
-
-  // ── 8. Data freshness ────────────────────────────────────────────────────────
-  const freshness = getDataFreshness(db);
-  const dataFreshness = buildDataFreshness(freshness);
 
   // ── 9. Compose response ──────────────────────────────────────────────────────
   const response: PatentCliffResponse = {
@@ -216,6 +228,7 @@ export async function handlePatentCliff(
       estimate_notice: ESTIMATE_NOTICE,
       sealed_paragraph_iv_notice: SEALED_PARA_IV_NOTICE,
       pre_anda_notice: PRE_ANDA_NOTICE,
+      ...(ptabDataAvailable ? {} : { ptab_unavailable_notice: PTAB_UNAVAILABLE_NOTICE }),
     },
 
     data_freshness: dataFreshness,

@@ -163,6 +163,7 @@ export interface PatentCliffResponse {
   };
 
   ptab: {
+    data_available: boolean;
     active_proceedings: number;
     proceedings: Array<{
       case_number: string;
@@ -182,6 +183,7 @@ export interface PatentCliffResponse {
     estimate_notice: string;
     sealed_paragraph_iv_notice: string;
     pre_anda_notice: string;
+    ptab_unavailable_notice?: string;
   };
 
   data_freshness: {

@@ -28,6 +28,7 @@ export interface VerdictInput {
   finalAdjustedExpiry: string;
   paragraphIVRows: ParagraphIVRow[];
   ptabRows: PTABProceedingRow[];
+  ptabDataAvailable: boolean;
   pediatric: PediatricResult;
   exclusivityRows: ExclusivityRow[];
 }
@@ -42,6 +43,7 @@ export interface VerdictOutput {
     stay_expires: string | null;
   };
   ptab: {
+    data_available: boolean;
     active_proceedings: number;
     proceedings: Array<{
       case_number: string;
@@ -89,9 +91,9 @@ export function synthesizeVerdict(input: VerdictInput): VerdictOutput {
   }
 
   // ── PTAB analysis ──────────────────────────────────────────────
-  const activePTABRows = input.ptabRows.filter(
-    (r) => r.status === "Instituted"
-  );
+  const activePTABRows = input.ptabDataAvailable
+    ? input.ptabRows.filter((r) => r.status === "Instituted")
+    : [];
   const activePTABCount = activePTABRows.length;
 
   // ── Years to expiry ────────────────────────────────────────────
@@ -169,6 +171,12 @@ export function synthesizeVerdict(input: VerdictInput): VerdictOutput {
     );
   }
 
+  if (!input.ptabDataAvailable) {
+    riskFactors.push(
+      "PTAB proceedings data unavailable — IPR/PGR challenge history cannot be assessed; risk score does not account for active PTAB proceedings"
+    );
+  }
+
   return {
     risk_score: riskScore,
     risk_factors: riskFactors,
@@ -179,6 +187,7 @@ export function synthesizeVerdict(input: VerdictInput): VerdictOutput {
       stay_expires: stayExpires,
     },
     ptab: {
+      data_available: input.ptabDataAvailable,
       active_proceedings: activePTABCount,
       proceedings: input.ptabRows.map((r) => ({
         case_number: r.case_number,
