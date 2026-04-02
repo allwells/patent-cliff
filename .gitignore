@@ -9,6 +9,7 @@ dist/
 *.sqlite
 *.db-shm
 *.db-wal
+data/
 
 # Project meta files — not for version control
 .codex

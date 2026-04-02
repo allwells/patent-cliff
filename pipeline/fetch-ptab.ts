@@ -5,7 +5,15 @@
  * for all patents tracked in ob_patents. An active IPR represents a risk
  * that the patent could be invalidated before its nominal expiry date.
  *
- * PTAB API: https://developer.uspto.gov/ptab-api/
+ * PTAB API v3 (current): https://data.uspto.gov/apis/ptab-trials
+ *   Endpoint: POST /api/v1/patent/trials/proceedings/search
+ *   Requires: ODP API key (X-API-KEY header)
+ *   Key registration: https://data.uspto.gov — requires ID.me identity verification
+ *
+ * NOTE: The ODP API key requires ID.me, which has regional restrictions.
+ * If unavailable, this pipeline returns 0 rows and the tool degrades gracefully
+ * (PTAB risk factor is omitted from the verdict score).
+ *
  * Rate limited — uses backoff on 429 responses.
  *
  * Run via: bun pipeline/fetch-ptab.ts
@@ -17,7 +25,10 @@ import { config } from "dotenv";
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
-const PTAB_API_BASE = "https://developer.uspto.gov/ptab-api";
+// PTAB API v2 at developer.uspto.gov/ptab-api was decommissioned January 6, 2026.
+// PTAB API v3 is at data.uspto.gov but requires an ODP API key (ID.me verification).
+// Without a key, all responses return HTML — the HTML-detection guard below handles this.
+const PTAB_API_BASE = process.env["PTAB_API_BASE"] ?? "https://developer.uspto.gov/ptab-api";
 
 interface PipelineResult {
   source: "ptab";

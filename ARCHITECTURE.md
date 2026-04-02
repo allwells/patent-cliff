@@ -66,20 +66,20 @@
 
 ### Automated (pipeline fetches on schedule)
 
-| Source | Pipeline Script | Update Frequency |
-|--------|----------------|-----------------|
-| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) — single zip with `products.txt`, `patent.txt`, `exclusivity.txt` | `fetch-orangebook.ts` | Monthly |
-| [USPTO PTAB API v3](https://data.uspto.gov/apis/ptab-trials) — IPR/PGR/CBM proceedings | `fetch-ptab.ts` | Bi-weekly |
+| Source                                                                                                                                                             | Pipeline Script       | Update Frequency |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- | ---------------- |
+| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) — single zip with `products.txt`, `patent.txt`, `exclusivity.txt` | `fetch-orangebook.ts` | Monthly          |
+| [USPTO PTAB API v3](https://data.uspto.gov/apis/ptab-trials) — IPR/PGR/CBM proceedings                                                                             | `fetch-ptab.ts`       | Bi-weekly        |
 
 ### Manual (CAPTCHA-protected — copy to `/data/patex/` on server)
 
 These files are distributed via [data.uspto.gov](https://data.uspto.gov) bulk data pages that require solving a math CAPTCHA before generating a time-limited signed download URL. Automated fetching is not possible. The pipeline reads them from the local filesystem.
 
-| File | Dataset | Download Page | Update Frequency |
-|------|---------|---------------|-----------------|
-| `pta_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
-| `pte_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
-| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly |
+| File                | Dataset                                                   | Download Page                                                                                    | Update Frequency |
+| ------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------- |
+| `pta_summary.csv`   | PatEx Research Dataset (ECOPAIR)                          | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair)     | Annually         |
+| `pte_summary.csv`   | PatEx Research Dataset (ECOPAIR)                          | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair)     | Annually         |
+| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly        |
 
 **Join logic:** `pta_summary` and `pte_summary` are keyed by `application_number`. Orange Book patents are keyed by patent number. The join chain is:
 
@@ -188,12 +188,13 @@ Two Docker containers share a single bind-mounted volume:
 Maps to /data/ inside both containers.
 ```
 
-| Container | Dockerfile | Role |
-|-----------|-----------|------|
-| `patent-cliff` | `Dockerfile` | MCP server — serves queries |
+| Container               | Dockerfile            | Role                                                                           |
+| ----------------------- | --------------------- | ------------------------------------------------------------------------------ |
+| `patent-cliff`          | `Dockerfile`          | MCP server — serves queries                                                    |
 | `patent-cliff-pipeline` | `Dockerfile.pipeline` | supercronic — runs `pipeline/run-all.ts` on the 5th of each month at 03:00 UTC |
 
 Pipeline run order enforced by `run-all.ts`:
+
 1. `fetch-orangebook.ts` — must succeed; downstream scripts depend on `ob_patents`
 2. `fetch-pta.ts`, `fetch-pte.ts`, `fetch-ptab.ts` — run in parallel
 

@@ -42,10 +42,10 @@ bun install
 cp .env.example .env
 ```
 
-| Variable   | Default             | Description                       |
-| ---------- | ------------------- | --------------------------------- |
-| `PORT`     | `8000`              | HTTP server port                  |
-| `DB_PATH`  | `./patent-cliff.db` | Path to SQLite database file      |
+| Variable   | Default             | Description                        |
+| ---------- | ------------------- | ---------------------------------- |
+| `PORT`     | `8000`              | HTTP server port                   |
+| `DB_PATH`  | `./patent-cliff.db` | Path to SQLite database file       |
 | `DATA_DIR` | `/data`             | Root directory for bulk data files |
 
 ### Load data
@@ -64,11 +64,11 @@ PTA and PTE data comes from USPTO bulk research datasets hosted at [data.uspto.g
 
 **Files to download:**
 
-| File | Source Dataset | Page | Update Frequency |
-|------|---------------|------|-----------------|
-| `pta_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
-| `pte_summary.csv` | PatEx Research Dataset (ECOPAIR) | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair) | Annually |
-| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly |
+| File                | Source Dataset                                            | Page                                                                                             | Update Frequency |
+| ------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------- |
+| `pta_summary.csv`   | PatEx Research Dataset (ECOPAIR)                          | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair)     | Annually         |
+| `pte_summary.csv`   | PatEx Research Dataset (ECOPAIR)                          | [data.uspto.gov/bulkdata/datasets/ecopair](https://data.uspto.gov/bulkdata/datasets/ecopair)     | Annually         |
+| `g_application.tsv` | PatentsView Granted Patent Disambiguated Data (PVGPATDIS) | [data.uspto.gov/bulkdata/datasets/pvgpatdis](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | Quarterly        |
 
 After downloading, extract the zip files and place the CSVs/TSV at:
 
@@ -114,10 +114,10 @@ bun run start    # production
 
 The server exposes two endpoints:
 
-| Endpoint      | Description                                                     |
-| ------------- | --------------------------------------------------------------- |
-| `GET /health` | Returns DB availability, data freshness per source              |
-| `POST /mcp`   | MCP endpoint — requires CTX Protocol auth JWT for `tools/call`  |
+| Endpoint      | Description                                                    |
+| ------------- | -------------------------------------------------------------- |
+| `GET /health` | Returns DB availability, data freshness per source             |
+| `POST /mcp`   | MCP endpoint — requires CTX Protocol auth JWT for `tools/call` |
 
 ---
 
@@ -125,9 +125,9 @@ The server exposes two endpoints:
 
 The project ships two Dockerfiles:
 
-| File | Purpose |
-|------|---------|
-| `Dockerfile` | MCP server — runs `bun dist/index.js` |
+| File                  | Purpose                                                   |
+| --------------------- | --------------------------------------------------------- |
+| `Dockerfile`          | MCP server — runs `bun dist/index.js`                     |
 | `Dockerfile.pipeline` | Pipeline scheduler — runs `supercronic` on a monthly cron |
 
 Both containers share the same bind-mounted `/data` volume. On Dokploy, create a second Application pointing to `Dockerfile.pipeline` with the same bind mount (`/var/lib/dokploy/volumes/patent-cliff` → `/data`).
@@ -144,10 +144,10 @@ scp ~/Downloads/g_application.tsv  user@your-vps:/var/lib/dokploy/volumes/patent
 
 **When to update data files:**
 
-| File | When |
-|------|------|
-| `pta_summary.csv` / `pte_summary.csv` | Annually — check [ECOPAIR dataset](https://data.uspto.gov/bulkdata/datasets/ecopair) for new release |
-| `g_application.tsv` | Quarterly — check [PVGPATDIS dataset](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) for new release |
+| File                                  | When                                                                                                      |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `pta_summary.csv` / `pte_summary.csv` | Annually — check [ECOPAIR dataset](https://data.uspto.gov/bulkdata/datasets/ecopair) for new release      |
+| `g_application.tsv`                   | Quarterly — check [PVGPATDIS dataset](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) for new release |
 
 ---
 
@@ -185,12 +185,12 @@ bun run /refresh-data orangebook   # refresh one source
 
 ## Data Sources
 
-| Source | Data | Update Frequency | TTL |
-| ------ | ---- | ---------------- | --- |
-| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files) | Approved drugs, patents, exclusivity, Para IV certifications | Monthly | 30 days |
-| [PatEx Research Dataset — ECOPAIR](https://data.uspto.gov/bulkdata/datasets/ecopair) | `pta_summary.csv` — Patent Term Adjustment totals and breakdown (§154); `pte_summary.csv` — Patent Term Extension records (§156) | Annually | 90 days |
-| [PatentsView Granted Patent Disambiguated Data — PVGPATDIS](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | `g_application.tsv` — application number to patent number mapping (join key for PTA/PTE) | Quarterly | 90 days |
-| [USPTO PTAB API](https://data.uspto.gov/apis/ptab-trials) | IPR/PGR/CBM proceedings | Ongoing | 14 days |
+| Source                                                                                                          | Data                                                                                                                             | Update Frequency | TTL     |
+| --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------- |
+| [FDA Orange Book](https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files)                | Approved drugs, patents, exclusivity, Para IV certifications                                                                     | Monthly          | 30 days |
+| [PatEx Research Dataset — ECOPAIR](https://data.uspto.gov/bulkdata/datasets/ecopair)                            | `pta_summary.csv` — Patent Term Adjustment totals and breakdown (§154); `pte_summary.csv` — Patent Term Extension records (§156) | Annually         | 90 days |
+| [PatentsView Granted Patent Disambiguated Data — PVGPATDIS](https://data.uspto.gov/bulkdata/datasets/pvgpatdis) | `g_application.tsv` — application number to patent number mapping (join key for PTA/PTE)                                         | Quarterly        | 90 days |
+| [USPTO PTAB API](https://data.uspto.gov/apis/ptab-trials)                                                       | IPR/PGR/CBM proceedings                                                                                                          | Ongoing          | 14 days |
 
 All data is public domain. PTA/PTE bulk files are ingested offline from locally-stored copies. Orange Book and PTAB are fetched automatically by pipeline scripts.
 
