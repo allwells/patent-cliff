@@ -14,14 +14,19 @@
 import { Database } from "bun:sqlite";
 import { config } from "dotenv";
 import { unzipSync } from "fflate";
+import { access, readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
+const DATA_DIR = process.env["DATA_DIR"] ?? "/data";
 const ORANGE_BOOK_PAGE_URL =
   process.env["ORANGE_BOOK_PAGE_URL"] ??
   "https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files";
 const ORANGE_BOOK_ZIP_URL = process.env["ORANGE_BOOK_ZIP_URL"] ?? null;
+const ORANGE_BOOK_ZIP_PATH =
+  process.env["ORANGE_BOOK_ZIP_PATH"] ?? join(DATA_DIR, "orangebook", "orangebook.zip");
 const ORANGE_BOOK_FALLBACK_ZIP_URLS = [
   "https://www.fda.gov/media/76860/download?attachment",
   "https://www.fda.gov/media/76860/download",
@@ -58,26 +63,7 @@ async function fetchOrangeBook(): Promise<void> {
     const { readFileSync } = await import("fs");
     db.exec(readFileSync(schemaPath, "utf-8"));
 
-    const zipUrl = await resolveOrangeBookZipUrl();
-
-    console.error(
-      JSON.stringify({
-        level: "info",
-        source: "orangebook",
-        message: "Fetching Orange Book zip...",
-        zip_url: zipUrl,
-      })
-    );
-
-    const zipRes = await fetch(zipUrl, {
-      headers: buildFDAHeaders(),
-    });
-
-    if (!zipRes.ok) {
-      throw new Error(`Failed to fetch Orange Book zip: ${zipRes.status} ${zipRes.statusText}`);
-    }
-
-    const zipBuffer = new Uint8Array(await zipRes.arrayBuffer());
+    const zipBuffer = await loadOrangeBookZip();
     const files = unzipSync(zipBuffer);
 
     const decoder = new TextDecoder("utf-8");
@@ -246,6 +232,41 @@ async function fetchOrangeBook(): Promise<void> {
   console.log(JSON.stringify(result));
 }
 
+async function loadOrangeBookZip(): Promise<Uint8Array> {
+  if (await fileExists(ORANGE_BOOK_ZIP_PATH)) {
+    console.error(
+      JSON.stringify({
+        level: "info",
+        source: "orangebook",
+        message: "Loading Orange Book zip from local file",
+        zip_path: ORANGE_BOOK_ZIP_PATH,
+      })
+    );
+    return new Uint8Array(await readFile(ORANGE_BOOK_ZIP_PATH));
+  }
+
+  const zipUrl = await resolveOrangeBookZipUrl();
+
+  console.error(
+    JSON.stringify({
+      level: "info",
+      source: "orangebook",
+      message: "Fetching Orange Book zip...",
+      zip_url: zipUrl,
+    })
+  );
+
+  const zipRes = await fetch(zipUrl, {
+    headers: buildFDAHeaders(),
+  });
+
+  if (!zipRes.ok) {
+    throw new Error(`Failed to fetch Orange Book zip: ${zipRes.status} ${zipRes.statusText}`);
+  }
+
+  return new Uint8Array(await zipRes.arrayBuffer());
+}
+
 async function resolveOrangeBookZipUrl(): Promise<string> {
   if (ORANGE_BOOK_ZIP_URL) {
     return ORANGE_BOOK_ZIP_URL;
@@ -285,6 +306,15 @@ async function resolveOrangeBookZipUrl(): Promise<string> {
     `Could not resolve Orange Book ZIP from known URLs or ${ORANGE_BOOK_PAGE_URL}. ` +
       "Set ORANGE_BOOK_ZIP_URL explicitly to override."
   );
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function isReachable(url: string): Promise<boolean> {
