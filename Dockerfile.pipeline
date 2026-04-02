@@ -5,9 +5,9 @@ WORKDIR /app
 # Install supercronic (cron daemon designed for containers)
 # Check https://github.com/aptible/supercronic/releases if upgrading
 ARG SUPERCRONIC_VERSION=v0.2.33
-ARG SUPERCRONIC_ARCH=amd64
-RUN wget -qO /usr/local/bin/supercronic \
-      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${SUPERCRONIC_ARCH}" \
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
+    && wget -qO /usr/local/bin/supercronic \
+         "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${ARCH}" \
     && chmod +x /usr/local/bin/supercronic
 
 # Install dependencies

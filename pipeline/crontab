@@ -1,4 +1,4 @@
 # Patent Cliff pipeline schedule (UTC)
 # Orange Book updates on the 1st of each month; run on the 5th to ensure the new file is live.
 # PTA/PTE/PTAB are fetched from live APIs so they stay current with each run.
-0 3 5 * * /usr/local/bin/bun /app/pipeline/run-all.ts >> /proc/1/fd/1 2>&1
+0 3 5 * * /usr/local/bin/bun /app/pipeline/run-all.ts
