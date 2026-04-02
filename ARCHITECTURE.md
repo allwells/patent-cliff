@@ -188,10 +188,21 @@ Two Docker containers share a single bind-mounted volume:
 Maps to /data/ inside both containers.
 ```
 
-| Container               | Dockerfile            | Role                                                                           |
-| ----------------------- | --------------------- | ------------------------------------------------------------------------------ |
-| `patent-cliff`          | `Dockerfile`          | MCP server — serves queries                                                    |
-| `patent-cliff-pipeline` | `Dockerfile.pipeline` | supercronic — runs `pipeline/run-all.ts` on the 5th of each month at 03:00 UTC |
+| Container               | Dockerfile            | Role                                                                                          |
+| ----------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| `patent-cliff`          | `Dockerfile`          | MCP server — serves queries 24/7                                                              |
+| `patent-cliff-pipeline` | `Dockerfile.pipeline` | One-shot job — runs `pipeline/run-all.ts` and exits; triggered by VPS host cron (see below)  |
+
+**Scheduling:** Add this to `/etc/crontab` on the VPS host (adjust the image name to match what Dokploy built):
+
+```sh
+0 3 5 * * root docker run --rm \
+  -e DB_PATH=/data/cache.db \
+  -v /var/lib/dokploy/volumes/patent-cliff:/data \
+  patent-cliff-pipeline
+```
+
+The pipeline container runs, writes to the shared SQLite volume, and exits. No scheduler daemon inside the container.
 
 Pipeline run order enforced by `run-all.ts`:
 
