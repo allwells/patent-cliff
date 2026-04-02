@@ -150,8 +150,12 @@ async function fetchPTA(): Promise<void> {
     runInserts(ptaRows);
 
     db.prepare(`
-      INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
-      VALUES ('pta', ?, ?, 'success')
+      INSERT INTO data_freshness (source, last_updated, rows_current, last_run_status, ttl_days)
+      VALUES ('pta', ?, ?, 'success', 90)
+      ON CONFLICT(source) DO UPDATE SET
+        last_updated = excluded.last_updated,
+        rows_current = excluded.rows_current,
+        last_run_status = excluded.last_run_status
     `).run(result.last_updated, result.rows_inserted);
 
     result.status = result.rows_skipped > 0 ? "partial" : "success";
@@ -168,8 +172,12 @@ async function fetchPTA(): Promise<void> {
     console.error(JSON.stringify({ level: "error", source: "pta", message }));
 
     db.prepare(`
-      INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
-      VALUES ('pta', ?, 0, 'failed')
+      INSERT INTO data_freshness (source, last_updated, rows_current, last_run_status, ttl_days)
+      VALUES ('pta', ?, 0, 'failed', 90)
+      ON CONFLICT(source) DO UPDATE SET
+        last_updated = excluded.last_updated,
+        rows_current = excluded.rows_current,
+        last_run_status = excluded.last_run_status
     `).run(result.last_updated);
   } finally {
     db.close();

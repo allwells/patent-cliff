@@ -143,8 +143,12 @@ async function fetchPTE(): Promise<void> {
     runInserts(pteRows);
 
     db.prepare(`
-      INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
-      VALUES ('pte', ?, ?, 'success')
+      INSERT INTO data_freshness (source, last_updated, rows_current, last_run_status, ttl_days)
+      VALUES ('pte', ?, ?, 'success', 90)
+      ON CONFLICT(source) DO UPDATE SET
+        last_updated = excluded.last_updated,
+        rows_current = excluded.rows_current,
+        last_run_status = excluded.last_run_status
     `).run(result.last_updated, result.rows_inserted);
 
     result.status = result.rows_skipped > 0 ? "partial" : "success";
@@ -161,8 +165,12 @@ async function fetchPTE(): Promise<void> {
     console.error(JSON.stringify({ level: "error", source: "pte", message }));
 
     db.prepare(`
-      INSERT OR REPLACE INTO data_freshness (source, last_updated, rows_current, last_run_status)
-      VALUES ('pte', ?, 0, 'failed')
+      INSERT INTO data_freshness (source, last_updated, rows_current, last_run_status, ttl_days)
+      VALUES ('pte', ?, 0, 'failed', 90)
+      ON CONFLICT(source) DO UPDATE SET
+        last_updated = excluded.last_updated,
+        rows_current = excluded.rows_current,
+        last_run_status = excluded.last_run_status
     `).run(result.last_updated);
   } finally {
     db.close();

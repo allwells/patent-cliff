@@ -24,6 +24,18 @@ export function initDatabase(dbPath: string): void {
       // Column already exists — no-op
     }
 
+    // Normalize source-specific TTLs in case older pipeline runs overwrote rows via REPLACE.
+    db.exec(`
+      UPDATE data_freshness
+      SET ttl_days = CASE source
+        WHEN 'orangebook' THEN 30
+        WHEN 'pta' THEN 90
+        WHEN 'pte' THEN 90
+        WHEN 'ptab' THEN 14
+        ELSE ttl_days
+      END
+    `);
+
     logger.info("db", "Database initialized", { path: dbPath });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
