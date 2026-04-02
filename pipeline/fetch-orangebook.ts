@@ -18,7 +18,10 @@ import { unzipSync } from "fflate";
 config();
 
 const DB_PATH = process.env["DB_PATH"] ?? "/data/patent-cliff.db";
-const OB_ZIP_URL = "https://www.fda.gov/media/76860/download";
+const ORANGE_BOOK_PAGE_URL =
+  process.env["ORANGE_BOOK_PAGE_URL"] ??
+  "https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files";
+const ORANGE_BOOK_ZIP_URL = process.env["ORANGE_BOOK_ZIP_URL"] ?? null;
 
 interface PipelineResult {
   source: "orangebook";
@@ -51,11 +54,18 @@ async function fetchOrangeBook(): Promise<void> {
     const { readFileSync } = await import("fs");
     db.exec(readFileSync(schemaPath, "utf-8"));
 
+    const zipUrl = await resolveOrangeBookZipUrl();
+
     console.error(
-      JSON.stringify({ level: "info", source: "orangebook", message: "Fetching Orange Book zip..." })
+      JSON.stringify({
+        level: "info",
+        source: "orangebook",
+        message: "Fetching Orange Book zip...",
+        zip_url: zipUrl,
+      })
     );
 
-    const zipRes = await fetch(OB_ZIP_URL, {
+    const zipRes = await fetch(zipUrl, {
       headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
     });
 
@@ -230,6 +240,41 @@ async function fetchOrangeBook(): Promise<void> {
   }
 
   console.log(JSON.stringify(result));
+}
+
+async function resolveOrangeBookZipUrl(): Promise<string> {
+  if (ORANGE_BOOK_ZIP_URL) {
+    return ORANGE_BOOK_ZIP_URL;
+  }
+
+  const pageRes = await fetch(ORANGE_BOOK_PAGE_URL, {
+    headers: { "User-Agent": "PatentCliff/1.0 (patent data pipeline)" },
+  });
+
+  if (!pageRes.ok) {
+    throw new Error(
+      `Failed to fetch Orange Book data page: ${pageRes.status} ${pageRes.statusText}`
+    );
+  }
+
+  const html = await pageRes.text();
+
+  const directLinkMatch = html.match(
+    /<a[^>]+href="([^"]+)"[^>]*>\s*compressed\s*\(\.ZIP\)\s*data file\s*<\/a>/i
+  );
+  if (directLinkMatch?.[1]) {
+    return new URL(directLinkMatch[1], ORANGE_BOOK_PAGE_URL).toString();
+  }
+
+  const mediaLinkMatch = html.match(/href="([^"]*\/media\/\d+\/download[^"]*)"/i);
+  if (mediaLinkMatch?.[1]) {
+    return new URL(mediaLinkMatch[1], ORANGE_BOOK_PAGE_URL).toString();
+  }
+
+  throw new Error(
+    `Could not locate Orange Book ZIP link on ${ORANGE_BOOK_PAGE_URL}. ` +
+      "Set ORANGE_BOOK_ZIP_URL explicitly to override."
+  );
 }
 
 function extractZipEntry(
